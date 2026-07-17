@@ -187,9 +187,65 @@ static void set_root_dir(const char *file) {
         snprintf(g_root_dir, sizeof g_root_dir, ".");
 }
 
+/* Interactive REPL over one persistent context (top-level let/const/function
+ * carry across lines through the lexical scope). */
+static int run_repl(void) {
+    JsVm *vm = js_vm_new(NULL);
+    JsContext *ctx = js_context_new(vm);
+    if (!vm || !ctx) {
+        fprintf(stderr, "jsvm: out of memory\n");
+        return 2;
+    }
+    static const uint16_t print_name[] = {'p', 'r', 'i', 'n', 't'};
+    js_register_native(ctx, print_name, 5, native_print, NULL);
+
+    fprintf(stderr, "jsvm REPL — Ctrl-D to exit\n");
+    char line[8192];
+    for (;;) {
+        fputs("> ", stderr);
+        fflush(stderr);
+        if (!fgets(line, sizeof line, stdin))
+            break;
+        size_t bl = strlen(line);
+        if (bl == 0)
+            continue;
+        size_t len;
+        uint16_t *src = utf8_to_utf16((const uint8_t *)line, bl, &len);
+        if (!src)
+            continue;
+        const char *err_msg;
+        uint32_t err_pos;
+        JsValue fn = js_compile_module_repl(ctx, src, len, &err_msg, &err_pos);
+        if (!js_is_function(fn)) {
+            fprintf(stderr, "SyntaxError: %s\n", err_msg ? err_msg : "compile error");
+        } else {
+            js_gc_protect(vm, &fn);
+            JsValue result;
+            bool ok = js_run_module(ctx, fn, &result);
+            js_gc_protect(vm, &result);
+            JsValue str = js_to_string(ctx, result);
+            size_t sl;
+            const uint16_t *su = js_string_units(str, &sl);
+            if (!ok)
+                fputs("Uncaught ", stdout);
+            if (su)
+                print_utf16(stdout, su, sl);
+            fputc('\n', stdout);
+            fflush(stdout);
+            js_gc_unprotect(vm, &result);
+            js_gc_unprotect(vm, &fn);
+        }
+        free(src);
+    }
+    js_vm_free(vm);
+    return 0;
+}
+
 int main(int argc, char **argv) {
+    if (argc == 1)
+        return run_repl(); /* no file: interactive REPL */
     if (argc != 2) {
-        fprintf(stderr, "usage: jsvm <file.js>\n");
+        fprintf(stderr, "usage: jsvm [file.js]   (no file starts a REPL)\n");
         return 2;
     }
     size_t byte_len;

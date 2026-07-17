@@ -25,7 +25,11 @@ typedef enum JsOp {
     JS_OP_GET_GLOBAL,      /* u16 const idx (atom); ReferenceError if absent */
     JS_OP_GET_GLOBAL_SOFT, /* u16; undefined if absent (typeof) */
     JS_OP_SET_GLOBAL,      /* u16; peeks; ReferenceError if undeclared */
-    JS_OP_DEFINE_GLOBAL,   /* u16; peeks; creates-or-sets a global (REPL decls) */
+    /* REPL persistent lexical scope (falls back to globals for builtins) */
+    JS_OP_GET_LEXICAL,     /* u16; scope then global; ReferenceError if neither */
+    JS_OP_GET_LEXICAL_SOFT,/* u16; undefined if neither (typeof) */
+    JS_OP_SET_LEXICAL,     /* u16; peeks; const-checked; ReferenceError if neither */
+    JS_OP_DEFINE_LEXICAL,  /* u16 name, u8 is_const; peeks; declares in scope */
     JS_OP_ADD, JS_OP_SUB, JS_OP_MUL, JS_OP_DIV, JS_OP_MOD, JS_OP_POW,
     JS_OP_NEG, JS_OP_POS, JS_OP_NOT, JS_OP_BITNOT,
     JS_OP_BITAND, JS_OP_BITOR, JS_OP_BITXOR,

@@ -316,6 +316,12 @@ struct JsContext {
     JsObject *array_methods;
     JsObject *number_methods;
     JsObject *promise_methods;
+    /* persistent REPL lexical scope: top-level let/const/function bindings
+     * that survive across evaluations. repl_scope holds values (TDZ sentinel
+     * for uninitialized); repl_const marks the const names. Both lazily
+     * created and only used by REPL-mode compilation. */
+    JsObject *repl_scope;
+    JsObject *repl_const;
     /* module registry (cache by specifier; all GC roots) */
     JsModule **modules;
     uint32_t module_count, module_cap;

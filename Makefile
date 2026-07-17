@@ -81,6 +81,14 @@ build/test_modules_asan: $(SRC) test/test_modules.c $(HDR)
 	@mkdir -p build
 	$(CC) $(WARNINGS) $(ASAN) $(INC) $(SRC) test/test_modules.c -o $@
 
+build/test_repl: $(SRC) test/test_repl.c $(HDR)
+	@mkdir -p build
+	$(CC) $(WARNINGS) $(CFLAGS) $(INC) $(SRC) test/test_repl.c -o $@
+
+build/test_repl_asan: $(SRC) test/test_repl.c $(HDR)
+	@mkdir -p build
+	$(CC) $(WARNINGS) $(ASAN) $(INC) $(SRC) test/test_repl.c -o $@
+
 # the jsvm CLI: compile + run a .js file
 .PHONY: cli
 cli: build/jsvm
@@ -91,7 +99,8 @@ build/jsvm: $(SRC) tools/jsvm_cli.c $(HDR)
 .PHONY: test
 test: build/test_runner build/test_runner_asan build/test_syntax build/test_syntax_asan \
       build/test_exec build/test_exec_asan build/test_builtins build/test_builtins_asan \
-      build/test_async build/test_async_asan build/test_modules build/test_modules_asan
+      build/test_async build/test_async_asan build/test_modules build/test_modules_asan \
+      build/test_repl build/test_repl_asan
 	./build/test_runner
 	./build/test_runner_asan
 	./build/test_syntax
@@ -104,6 +113,8 @@ test: build/test_runner build/test_runner_asan build/test_syntax build/test_synt
 	./build/test_async_asan
 	./build/test_modules
 	./build/test_modules_asan
+	./build/test_repl
+	./build/test_repl_asan
 
 # Freestanding wasm32: no libc, no OS. The core never calls libc; the shim
 # provides the mem* symbols the compiler itself may emit. -fno-builtin keeps

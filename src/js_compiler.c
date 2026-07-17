@@ -85,7 +85,8 @@ typedef struct JsCompiler {
     JsVm *vm;
     JsArena arena;
     JsFuncState *cur;
-    bool repl; /* REPL: top-level declarations become persistent globals */
+    bool repl;       /* REPL: top-level declarations join the lexical scope */
+    bool decl_const; /* const-ness of the declaration currently being compiled */
     const char *err_msg;
     uint32_t err_pos;
     int func_depth;
@@ -652,7 +653,8 @@ static bool compile_ident_load(JsCompiler *cx, const JsAstNode *n) {
     uint16_t c;
     if (!atom_const(cx, n->units, n->len, n->pos, &c))
         return false;
-    return emit_op_u16(cx, JS_OP_GET_GLOBAL, c, +1);
+    /* REPL: names not otherwise bound resolve to the lexical scope, else global */
+    return emit_op_u16(cx, cx->repl ? JS_OP_GET_LEXICAL : JS_OP_GET_GLOBAL, c, +1);
 }
 
 static bool compile_ident_store(JsCompiler *cx, const JsAstNode *target) {
@@ -680,7 +682,7 @@ static bool compile_ident_store(JsCompiler *cx, const JsAstNode *target) {
     uint16_t c;
     if (!atom_const(cx, target->units, target->len, target->pos, &c))
         return false;
-    return emit_op_u16(cx, JS_OP_SET_GLOBAL, c, 0);
+    return emit_op_u16(cx, cx->repl ? JS_OP_SET_LEXICAL : JS_OP_SET_GLOBAL, c, 0);
 }
 
 /* ---- member chains (optional chaining aware) ---- */
@@ -758,13 +760,13 @@ static bool store_target(JsCompiler *cx, const JsAstNode *tgt, bool declaring) {
     if (declaring) {
         int idx = resolve_local_in(cx->cur, tgt->units, tgt->len);
         if (idx < 0) {
-            /* REPL top-level declaration -> define a persistent global */
+            /* REPL top-level declaration -> persistent lexical binding */
             if (is_repl_top(cx)) {
                 uint16_t c;
                 if (!atom_const(cx, tgt->units, tgt->len, tgt->pos, &c))
                     return false;
-                return emit_op_u16(cx, JS_OP_DEFINE_GLOBAL, c, 0) &&
-                       emit_op(cx, JS_OP_POP, -1);
+                return emit_op_u16(cx, JS_OP_DEFINE_LEXICAL, c, 0) &&
+                       emit8(cx, cx->decl_const ? 1 : 0) && emit_op(cx, JS_OP_POP, -1);
             }
             /* an exported top-level binding: initialize the export */
             if (cx->module && cx->cur->is_module) {
@@ -1361,7 +1363,8 @@ static bool compile_expr(JsCompiler *cx, const JsAstNode *n) {
                 uint16_t c;
                 if (!atom_const(cx, n->a->units, n->a->len, n->a->pos, &c))
                     return false;
-                return emit_op_u16(cx, JS_OP_GET_GLOBAL_SOFT, c, +1) &&
+                return emit_op_u16(cx, cx->repl ? JS_OP_GET_LEXICAL_SOFT : JS_OP_GET_GLOBAL_SOFT,
+                                   c, +1) &&
                        emit_op(cx, JS_OP_TYPEOF, 0);
             }
             return compile_expr(cx, n->a) && emit_op(cx, JS_OP_TYPEOF, 0);
@@ -1562,6 +1565,7 @@ static bool compile_function(JsCompiler *cx, const JsAstNode *fnode) {
 /* ---- statements ---- */
 
 static bool compile_let_decl(JsCompiler *cx, const JsAstNode *n) {
+    cx->decl_const = (n->flags & JS_F_CONST) != 0; /* for REPL DEFINE_LEXICAL */
     for (uint32_t i = 0; i < n->count; i++) {
         const JsAstNode *d = n->items[i];
         note_pos(cx, d->pos);
@@ -1591,10 +1595,11 @@ static bool hoist_functions(JsCompiler *cx, JsAstNode *const *stmts, uint32_t co
         if (!compile_function(cx, s))
             return false;
         if (!exported && is_repl_top(cx)) {
-            /* REPL top-level function -> persistent global */
+            /* REPL top-level function -> persistent lexical binding (not const) */
             uint16_t c;
             if (!atom_const(cx, s->units, s->len, s->pos, &c) ||
-                !emit_op_u16(cx, JS_OP_DEFINE_GLOBAL, c, 0) || !emit_op(cx, JS_OP_POP, -1))
+                !emit_op_u16(cx, JS_OP_DEFINE_LEXICAL, c, 0) || !emit8(cx, 0) ||
+                !emit_op(cx, JS_OP_POP, -1))
                 return false;
             continue;
         }

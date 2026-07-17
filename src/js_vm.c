@@ -115,6 +115,8 @@ JsContext *js_context_new(JsVm *vm) {
     ctx->array_methods = NULL;
     ctx->number_methods = NULL;
     ctx->promise_methods = NULL;
+    ctx->repl_scope = NULL;
+    ctx->repl_const = NULL;
     ctx->modules = NULL;
     ctx->module_count = ctx->module_cap = 0;
     ctx->resolver = NULL;

@@ -211,6 +211,10 @@ void js_gc_collect(JsVm *vm) {
             js_gc_mark_cell(vm, &ctx->number_methods->gc);
         if (ctx->promise_methods)
             js_gc_mark_cell(vm, &ctx->promise_methods->gc);
+        if (ctx->repl_scope)
+            js_gc_mark_cell(vm, &ctx->repl_scope->gc);
+        if (ctx->repl_const)
+            js_gc_mark_cell(vm, &ctx->repl_const->gc);
         js_gc_mark_module_registry(ctx);
         if (ctx->fiber)
             js_gc_mark_cell(vm, &ctx->fiber->gc);

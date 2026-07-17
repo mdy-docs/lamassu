@@ -24,6 +24,14 @@ language.
   REPL keeps a persistent VM so state carries across runs; a `print()` native
   captures output. The `web` build is non-freestanding (Emscripten supplies
   libc); the freestanding `wasm` target remains the embeddable core.
+- A **persistent lexical environment** for REPL sessions
+  (`js_compile_module_repl`): top-level `let`/`const`/`function` bindings
+  live in a per-context lexical scope (values + a const-marker set) that
+  survives across evaluations, with real `const` enforcement and correct
+  block/loop scoping (bindings inside blocks and loop heads stay local).
+  Free names fall back to globals so builtins still resolve. Used by the web
+  REPL, the CLI's interactive REPL (`jsvm` with no file), and any embedder.
+  New opcodes: `GET_LEXICAL`/`GET_LEXICAL_SOFT`/`SET_LEXICAL`/`DEFINE_LEXICAL`.
 
 ## Non-goals
 

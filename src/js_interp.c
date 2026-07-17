@@ -544,22 +544,37 @@ static void fiber_throw(JsContext *ctx, JsFiber *fb, const char *ascii_msg) {
     fb->failed = true;
 }
 
+/*
+ * Builds "<prefix><name><suffix>" as one string. The message is assembled in
+ * a heap buffer (only the final js_string_cell_new allocates a GC cell), so
+ * there are no unrooted intermediate strings to be freed by a GC that fires
+ * mid-build — a bug that only surfaces once the heap is large enough to
+ * collect during error formatting.
+ */
 static void fiber_throw_name(JsContext *ctx, JsFiber *fb, const char *prefix,
                              const JsString *name, const char *suffix) {
     JsVm *vm = ctx->vm;
-    JsString *p = js_ascii_cell(vm, prefix);
-    JsString *full = NULL;
-    if (p) {
-        JsString *pn = js_concat_cells(vm, p, name);
-        if (pn) {
-            JsString *sfx = js_ascii_cell(vm, suffix);
-            if (sfx)
-                full = js_concat_cells(vm, pn, sfx);
-        }
+    size_t plen = 0, slen = 0;
+    while (prefix[plen])
+        plen++;
+    while (suffix[slen])
+        slen++;
+    size_t total = plen + name->length + slen;
+    uint16_t *buf = js_realloc_raw(vm, NULL, 0, total * sizeof(uint16_t));
+    if (!buf) {
+        fiber_throw(ctx, fb, prefix);
+        return;
     }
-    fb->error = full ? js_value_from_cell(&full->gc) : js_undefined();
-    if (!full && p)
-        fb->error = js_value_from_cell(&p->gc);
+    size_t n = 0;
+    for (size_t i = 0; i < plen; i++)
+        buf[n++] = (uint16_t)(unsigned char)prefix[i];
+    for (uint32_t i = 0; i < name->length; i++)
+        buf[n++] = name->units[i];
+    for (size_t i = 0; i < slen; i++)
+        buf[n++] = (uint16_t)(unsigned char)suffix[i];
+    JsString *s = js_string_cell_new(vm, buf, (uint32_t)total);
+    js_realloc_raw(vm, buf, total * sizeof(uint16_t), 0);
+    fb->error = s ? js_value_from_cell(&s->gc) : js_undefined();
     fb->failed = true;
 }
 
@@ -923,11 +938,78 @@ run:; /* (re)load the top frame */
                     RT_THROW("out of memory");
                 break;
             }
-            case JS_OP_DEFINE_GLOBAL: {
-                /* REPL top-level declaration: create/overwrite a global */
+            case JS_OP_GET_LEXICAL:
+            case JS_OP_GET_LEXICAL_SOFT: {
                 JsString *name = js_value_string(K[READ_U16()]);
+                bool found = false;
+                JsValue v = js_undefined();
+                if (ctx->repl_scope)
+                    v = js_map_get(&ctx->repl_scope->props, name, &found);
+                if (found) {
+                    if (v.bits == JS_SPECIAL_TDZ)
+                        RT_THROW("ReferenceError: cannot access variable before initialization");
+                    PUSH(v);
+                    break;
+                }
+                v = js_map_get(&ctx->globals->props, name, &found);
+                if (!found) {
+                    if (op == JS_OP_GET_LEXICAL_SOFT) {
+                        PUSH(js_undefined());
+                        break;
+                    }
+                    fiber_throw_name(ctx, fb, "ReferenceError: ", name, " is not defined");
+                    RT_RAISE();
+                }
+                PUSH(v);
+                break;
+            }
+            case JS_OP_SET_LEXICAL: {
+                JsString *name = js_value_string(K[READ_U16()]);
+                bool found = false;
+                if (ctx->repl_scope)
+                    js_map_get(&ctx->repl_scope->props, name, &found);
+                if (found) {
+                    bool is_const = false;
+                    if (ctx->repl_const)
+                        js_map_get(&ctx->repl_const->props, name, &is_const);
+                    if (is_const)
+                        RT_THROW("TypeError: assignment to constant variable");
+                    if (!js_map_set(vm, &ctx->repl_scope->props, name, PEEK(0)))
+                        RT_THROW("out of memory");
+                    break;
+                }
+                js_map_get(&ctx->globals->props, name, &found);
+                if (!found) {
+                    fiber_throw_name(ctx, fb, "ReferenceError: ", name, " is not defined");
+                    RT_RAISE();
+                }
                 if (!js_map_set(vm, &ctx->globals->props, name, PEEK(0)))
                     RT_THROW("out of memory");
+                break;
+            }
+            case JS_OP_DEFINE_LEXICAL: {
+                JsString *name = js_value_string(K[READ_U16()]);
+                uint8_t is_const = code[ip++];
+                if (!ctx->repl_scope) {
+                    JsValue s = js_object_new(vm); /* fiber-rooted; nothing to lose on GC */
+                    if (!js_is_object(s))
+                        RT_THROW("out of memory");
+                    ctx->repl_scope = js_value_object(s);
+                }
+                if (!js_map_set(vm, &ctx->repl_scope->props, name, PEEK(0)))
+                    RT_THROW("out of memory");
+                if (is_const) {
+                    if (!ctx->repl_const) {
+                        JsValue s = js_object_new(vm);
+                        if (!js_is_object(s))
+                            RT_THROW("out of memory");
+                        ctx->repl_const = js_value_object(s);
+                    }
+                    if (!js_map_set(vm, &ctx->repl_const->props, name, js_bool(true)))
+                        RT_THROW("out of memory");
+                } else if (ctx->repl_const) {
+                    js_map_delete(&ctx->repl_const->props, name); /* re-decl as non-const */
+                }
                 break;
             }
             case JS_OP_ADD: {
