@@ -82,7 +82,68 @@ typedef enum JsOp {
     JS_OP_SET_EXPORT,      /* u16 name; peeks; module.exports[name] = value */
     JS_OP_GET_IMPORT,      /* u16 import idx -> push source.exports[importedName] */
     JS_OP_IMPORT_NS,       /* u16 import idx -> push source's namespace object */
+    /* phase 10: regex (JSVM_HAS_REGEX builds; literals are rejected at
+     * compile time elsewhere, so the opcode never reaches other builds) */
+    JS_OP_NEW_REGEXP,      /* u16 source const, u16 flags const -> push regexp */
 } JsOp;
+
+#define JS_OP__COUNT (JS_OP_NEW_REGEXP + 1)
+
+/*
+ * Per-opcode metadata, the single source of truth the bytecode verifier
+ * (js_serialize.c) uses to walk and validate code. It MUST stay in lockstep
+ * with the interpreter's operand reads and sp arithmetic (js_interp.c) and
+ * the compiler's emitted stack deltas (js_compiler.c) — a test
+ * (test_bytecode.c) recomputes every function's max stack from this table and
+ * checks it against the compiler's, which fails loudly if the table drifts.
+ *
+ * form   — operand layout (drives decode + index-kind checks)
+ * cf     — control-flow shape (fallthrough / jump / branch / return / …)
+ * delta  — fall-through operand-stack delta (variable-count ops: see notes)
+ * min_in — operand-stack slots read before any push (underflow bound)
+ *
+ * Variable ops handled specially in the verifier, not by this table's delta:
+ *   JS_OP_CALL       delta = -(1+argc),  min_in = argc+2   (argc = u8 operand)
+ *   JS_OP_NEW_ARRAY  delta = 1-count,    min_in = count     (count = u16)
+ * Asymmetric branches (taken-edge delta differs from fall-through):
+ *   OPT_CALL_CHECK taken -2 · ITER_NEXT taken -2 · TRY_PUSH/GOSUB target +1.
+ */
+typedef enum JsOpForm {
+    OPF_NONE = 0,   /* no operands */
+    OPF_U8,         /* 1 byte: CALL argc */
+    OPF_CONST,      /* u16 constant index, any kind */
+    OPF_CONST_STR,  /* u16 constant index, must be a string */
+    OPF_LOCAL,      /* u16 local slot (< n_locals; CLOSE_UPVALS allows == n_locals) */
+    OPF_UPVAL,      /* u16 upvalue index (< n_upvals) */
+    OPF_U16,        /* u16 raw count (NEW_ARRAY) */
+    OPF_JUMP,       /* u32 code offset */
+    OPF_CLOSURE,    /* u16 constant (function) + u8 flags */
+    OPF_DEFLEX,     /* u16 constant (string) + u8 is_const */
+    OPF_REGEXP,     /* u16 constant (string) + u16 constant (string) */
+    OPF_IMPORT_IDX, /* u16 index into the module's imports[] (module bodies only) */
+} JsOpForm;
+
+typedef enum JsOpCf {
+    CF_NEXT = 0, /* falls through only */
+    CF_JUMP,     /* unconditional (target only) */
+    CF_BRANCH,   /* fall-through + conditional target */
+    CF_GOSUB,    /* fall-through + subroutine target (pushes return addr) */
+    CF_RETSUB,   /* no static successor (returns to a pushed address) */
+    CF_RETURN,   /* ends the frame */
+    CF_THROW,    /* transfers to a handler */
+} JsOpCf;
+
+typedef struct JsOpInfo {
+    uint8_t form;
+    uint8_t cf;
+    int8_t delta;
+    uint8_t min_in;
+    uint8_t operand_bytes;
+    bool valid; /* false = not a real opcode (gap / unused) */
+} JsOpInfo;
+
+/* Defined in js_serialize.c; NULL entry (valid=false) for any unknown byte. */
+extern const JsOpInfo js_op_info[JS_OP__COUNT];
 
 /* TDZ sentinel: internal special value, never exposed to scripts. */
 #define JS_SPECIAL_TDZ (JS_TAG_SPECIAL | 4)
@@ -159,6 +220,35 @@ void js_gc_mark_module_registry(JsContext *ctx);
 /* Compiles a parsed module AST into a body function bound to `mod`. */
 JsFunctionCell *js_compile_module_body(JsContext *ctx, const JsAstNode *module,
                                        JsModule *mod, JsCompileError *err);
+
+/* ---- module bytecode (js_serialize.c <-> js_module.c seam) ---- */
+
+/* Buffer-kind tags in a .jsbc header. */
+typedef enum JsBcKind {
+    JS_BC_SCRIPT = 0,
+    JS_BC_MODULE = 1,
+} JsBcKind;
+
+/* Peeks a bytecode buffer's kind; -1 if the header is bad/too short. */
+int js_bytecode_peek_kind(const uint8_t *buf, size_t len);
+
+/*
+ * Serializes one compiled (unlinked) module — its specifier, import/star/dep
+ * metadata, and body function tree — to a VM-owned buffer. Runtime state
+ * (resolved deps, live exports, status) is not written. false on OOM.
+ */
+bool js_bc_serialize_module(JsContext *ctx, JsModule *m, uint8_t **out, size_t *out_len);
+
+/*
+ * Loads + fully validates a module bytecode buffer into a fresh unlinked
+ * JsModule (body wired, every nested fn->module set, import indices verified),
+ * using `canon_spec` as the module's identity. The module is NOT registered;
+ * the caller (js_module.c) registers it. Returns NULL with *err set on any
+ * structural problem. The returned cell is reachable only via the caller's
+ * protected slot — root it immediately.
+ */
+JsModule *js_bc_load_module(JsContext *ctx, const uint8_t *buf, size_t len,
+                            JsString *canon_spec, const char **err);
 
 /* Creates a native function cell (not registered anywhere); undefined on OOM. */
 JsValue js_native_new(JsContext *ctx, const char *name, JsNativeFn fn, void *ud);

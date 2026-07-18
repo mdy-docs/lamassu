@@ -1,6 +1,18 @@
 build/
 
-# Emscripten build artifacts for the web playground (rebuilt by CI / `make web`).
-# web/index.html is source and IS committed.
+# Node / npm
+node_modules/
+*.log
+.DS_Store
+
+# Emscripten + Vite build artifacts (rebuilt by CI / `make pkg` / `vite build`).
+# Source (web/index.html, web/src, the package wrapper) IS committed.
+packages/lamassu-js/dist/
+web/dist/
+
+# legacy playground artifacts (now built by Vite)
 web/jsvm.js
 web/jsvm.wasm
+
+# npm pack output
+*.tgz

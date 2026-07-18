@@ -1,0 +1,51 @@
+{
+  "name": "@mdy-docs/lamassu-js",
+  "version": "0.1.0",
+  "description": "A strict, safe JavaScript-subset engine written in C, compiled to WebAssembly — sandboxed evaluation for untrusted templates.",
+  "type": "module",
+  "main": "./index.js",
+  "module": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./lamassu.wasm": "./dist/lamassu.wasm",
+    "./dist/lamassu.mjs": "./dist/lamassu.mjs",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "dist/lamassu.mjs",
+    "dist/lamassu.wasm"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "make -C ../.. pkg",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "javascript",
+    "interpreter",
+    "wasm",
+    "webassembly",
+    "sandbox",
+    "template",
+    "engine",
+    "untrusted"
+  ],
+  "license": "MIT",
+  "author": "Daniel Walton",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mdy-docs/lamassu-js.git",
+    "directory": "packages/lamassu-js"
+  },
+  "homepage": "https://mdy-docs.github.io/lamassu-js/",
+  "bugs": {
+    "url": "https://github.com/mdy-docs/lamassu-js/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

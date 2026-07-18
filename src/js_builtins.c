@@ -15,6 +15,9 @@
  */
 #include "js_bytecode.h"
 #include "jsvm_internal.h"
+#ifdef JSVM_HAS_REGEX
+#include "js_regexp.h"
+#endif
 
 #define ARG(i) ((i) < argc ? args[i] : js_undefined())
 
@@ -476,6 +479,10 @@ static void append_replacement(StrBuf *sb, JsString *rep, const uint16_t *match,
 
 static bool sm_replace_impl(JsContext *ctx, JsValue tv, const JsValue *args, int argc,
                             JsValue *r, bool all) {
+#ifdef JSVM_HAS_REGEX
+    if (js_regexp_is(ARG(0)))
+        return js_re_str_replace(ctx, tv, args, argc, r, all);
+#endif
     JsString *s;
     if (!str_this(ctx, tv, &s, r))
         return false;
@@ -518,6 +525,10 @@ static bool sm_replaceAll(JsContext *ctx, JsValue tv, const JsValue *a, int c, J
 }
 
 static bool sm_split(JsContext *ctx, JsValue tv, const JsValue *args, int argc, JsValue *r) {
+#ifdef JSVM_HAS_REGEX
+    if (js_regexp_is(ARG(0)))
+        return js_re_str_split(ctx, tv, args, argc, r);
+#endif
     JsString *s;
     if (!str_this(ctx, tv, &s, r))
         return false;
@@ -2343,6 +2354,10 @@ bool js_builtins_init(JsContext *ctx) {
         {"repeat", sm_repeat}, {"padStart", sm_padStart}, {"padEnd", sm_padEnd},
         {"replace", sm_replace}, {"replaceAll", sm_replaceAll}, {"split", sm_split},
         {"concat", sm_concat}, {"toString", sm_toString}, {"valueOf", sm_toString},
+#ifdef JSVM_HAS_REGEX
+        {"match", js_re_str_match}, {"matchAll", js_re_str_matchAll},
+        {"search", js_re_str_search},
+#endif
         {NULL, NULL}};
     static const MethodDef array_methods[] = {
         {"push", am_push}, {"pop", am_pop}, {"shift", am_shift}, {"unshift", am_unshift},
@@ -2457,6 +2472,12 @@ bool js_builtins_init(JsContext *ctx) {
     /* promises (js_promise.c) */
     if (!js_promise_builtins_init(ctx))
         return false;
+
+#ifdef JSVM_HAS_REGEX
+    /* RegExp global + hidden regexp method table (js_regexp.c) */
+    if (!js_regexp_builtins_init(ctx))
+        return false;
+#endif
 
     /* global functions */
     static const uint16_t n_parseInt[] = {'p','a','r','s','e','I','n','t'};

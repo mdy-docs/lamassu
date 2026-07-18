@@ -1,4 +1,7 @@
 #include "js_bytecode.h"
+#ifdef JSVM_HAS_REGEX
+#include "js_regexp.h"
+#endif
 
 /*
  * AST -> bytecode.
@@ -1397,8 +1400,24 @@ static bool compile_expr(JsCompiler *cx, const JsAstNode *n) {
         note_pos(cx, n->pos);
         /* operand in, result out: net stack effect 0 */
         return compile_expr(cx, n->a) && emit_op(cx, JS_OP_AWAIT, 0);
-    case JS_AST_REGEX:
-        return cerr(cx, n->pos, "regex arrives with the engine integration (phase 10)");
+    case JS_AST_REGEX: {
+#ifdef JSVM_HAS_REGEX
+        /* early SyntaxError: validate the pattern now; the opcode recompiles
+         * it at evaluation (a literal yields a fresh object each time) */
+        const char *em = js_regexp_validate(cx->vm, n->units, n->len,
+                                            n->units2, n->len2);
+        if (em)
+            return cerr(cx, n->pos, em);
+        uint16_t csrc, cflags;
+        if (!atom_const(cx, n->units, n->len, n->pos, &csrc) ||
+            !atom_const(cx, n->units2, n->len2, n->pos, &cflags))
+            return false;
+        note_pos(cx, n->pos);
+        return emit_op_u16(cx, JS_OP_NEW_REGEXP, csrc, +1) && emit_u16(cx, cflags);
+#else
+        return cerr(cx, n->pos, "regex support is not compiled into this build");
+#endif
+    }
     case JS_AST_SPREAD:
         return cerr(cx, n->pos, "spread is not valid here");
     default:

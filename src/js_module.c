@@ -193,8 +193,69 @@ static JsModule *module_get_or_compile(JsContext *ctx, JsString *specifier,
 
 static JsModule *instantiate(JsContext *ctx, JsModule *m, ModError *err);
 
+/*
+ * Returns the cached module for `canon_spec`, else loads `bytecode` into a
+ * fresh (unlinked) module, registers it, and returns it. The bytecode analogue
+ * of module_get_or_compile — after loading, a bytecode module has exactly the
+ * same JsModule shape as one compiled from source, so the whole
+ * instantiate/link/evaluate pipeline works on it unchanged.
+ */
+static JsModule *module_get_or_load(JsContext *ctx, JsString *canon_spec,
+                                    const uint8_t *bytecode, size_t len,
+                                    ModError *err) {
+    JsModule *existing = registry_find(ctx, canon_spec);
+    if (existing)
+        return existing;
+    const char *lerr = NULL;
+    JsModule *m = js_bc_load_module(ctx, bytecode, len, canon_spec, &lerr);
+    if (!m) {
+        err->msg = lerr ? lerr : "invalid module bytecode";
+        err->pos = 0;
+        return NULL;
+    }
+    JsValue mv = js_value_from_cell(&m->gc);
+    js_gc_protect(ctx->vm, &mv);
+    bool added = registry_add(ctx, (JsModule *)js_value_cell(mv));
+    m = (JsModule *)js_value_cell(mv);
+    js_gc_unprotect(ctx->vm, &mv);
+    if (!added) {
+        err->oom = true;
+        return NULL;
+    }
+    return m;
+}
+
 static bool resolve_dep(JsContext *ctx, JsModule *referrer, JsString *raw_spec,
                         JsModule **out, ModError *err) {
+    /* Bytecode graph: resolve to a dependency's compiled bytecode and load it.
+     * A context uses one resolver kind per eval (js_eval_module sets the source
+     * resolver, js_eval_module_bytecode the bytecode one). */
+    if (ctx->bc_resolver) {
+        const uint16_t *out_spec;
+        const uint8_t *out_bc;
+        size_t out_spec_len, out_len;
+        if (!ctx->bc_resolver(ctx->bc_resolver_ud, raw_spec->units, raw_spec->length,
+                              referrer->specifier->units, referrer->specifier->length,
+                              &out_spec, &out_spec_len, &out_bc, &out_len)) {
+            err->msg = "module not found";
+            err->pos = 0;
+            return false;
+        }
+        JsString *canon = js_value_string(js_atom(ctx->vm, out_spec, out_spec_len));
+        if (!canon) {
+            err->oom = true;
+            return false;
+        }
+        JsValue canonv = js_value_from_cell(&canon->gc);
+        js_gc_protect(ctx->vm, &canonv);
+        JsModule *dep = module_get_or_load(ctx, js_value_string(canonv), out_bc, out_len, err);
+        if (dep)
+            dep = instantiate(ctx, dep, err);
+        js_gc_unprotect(ctx->vm, &canonv);
+        *out = dep;
+        return dep != NULL;
+    }
+
     if (!ctx->resolver) {
         err->msg = "no module resolver set";
         err->pos = 0;
@@ -422,6 +483,89 @@ JsValue js_eval_module(JsContext *ctx, const uint16_t *specifier, size_t spec_le
     js_gc_unprotect(vm, &specv);
     *ok = ev;
     return ns;
+}
+
+JsValue js_eval_module_bytecode(JsContext *ctx, const uint16_t *specifier,
+                                size_t spec_len, const uint8_t *bytecode, size_t len,
+                                bool *ok, const char **err_msg, uint32_t *err_pos) {
+    JsVm *vm = ctx->vm;
+    *ok = true;
+    *err_msg = NULL;
+    *err_pos = 0;
+
+    JsString *spec = js_value_string(js_atom(vm, specifier, spec_len));
+    if (!spec) {
+        *ok = false;
+        *err_msg = "out of memory";
+        return js_undefined();
+    }
+    JsValue specv = js_value_from_cell(&spec->gc);
+    js_gc_protect(vm, &specv);
+
+    ModError err = {NULL, 0, false};
+    /* the root comes from the passed buffer; deps flow through the bytecode
+     * resolver (which the caller must have set if the root has imports) */
+    JsModule *root = module_get_or_load(ctx, js_value_string(specv), bytecode, len, &err);
+    if (root)
+        root = instantiate(ctx, root, &err);
+    if (root && !link_module(ctx, root, &err))
+        root = NULL;
+    if (!root) {
+        js_gc_unprotect(vm, &specv);
+        *ok = false;
+        *err_msg = err.oom ? "out of memory" : (err.msg ? err.msg : "module error");
+        *err_pos = err.pos;
+        return js_undefined();
+    }
+
+    JsValue rootv = js_value_from_cell(&root->gc);
+    js_gc_protect(vm, &rootv);
+    JsValue error;
+    bool ev = evaluate(ctx, (JsModule *)js_value_cell(rootv), &error);
+    JsValue ns = ev ? js_value_from_cell(&((JsModule *)js_value_cell(rootv))->exports->gc)
+                    : error;
+    js_gc_unprotect(vm, &rootv);
+    js_gc_unprotect(vm, &specv);
+    *ok = ev;
+    return ns;
+}
+
+bool js_bytecode_compile_module(JsContext *ctx, const uint16_t *specifier,
+                                size_t spec_len, const uint16_t *source,
+                                size_t source_len, uint8_t **out, size_t *out_len,
+                                const char **err_msg, uint32_t *err_pos) {
+    JsVm *vm = ctx->vm;
+    *err_msg = NULL;
+    *err_pos = 0;
+
+    JsString *spec = js_value_string(js_atom(vm, specifier, spec_len));
+    if (!spec) {
+        *err_msg = "out of memory";
+        return false;
+    }
+    JsValue specv = js_value_from_cell(&spec->gc);
+    js_gc_protect(vm, &specv);
+
+    /* Compile this module alone — no dependency resolution, linking, or
+     * evaluation — so it can be cached independently of its deps. */
+    ModError err = {NULL, 0, false};
+    JsModule *m = module_get_or_compile(ctx, js_value_string(specv), source, source_len, &err);
+    if (!m) {
+        js_gc_unprotect(vm, &specv);
+        *err_msg = err.oom ? "out of memory" : (err.msg ? err.msg : "module compile error");
+        *err_pos = err.pos;
+        return false;
+    }
+    JsValue mv = js_value_from_cell(&m->gc);
+    js_gc_protect(vm, &mv);
+    bool ser = js_bc_serialize_module(ctx, (JsModule *)js_value_cell(mv), out, out_len);
+    js_gc_unprotect(vm, &mv);
+    js_gc_unprotect(vm, &specv);
+    if (!ser) {
+        *err_msg = "bytecode serialization failed";
+        return false;
+    }
+    return true;
 }
 
 JsValue js_module_get_export(JsContext *ctx, JsValue ns, const uint16_t *name,

@@ -241,11 +241,270 @@ static int run_repl(void) {
     return 0;
 }
 
+/* Writes `len` bytes to `path`; returns 0 on success, else an errno-ish 2. */
+static int write_file(const char *path, const uint8_t *data, size_t len) {
+    FILE *f = fopen(path, "wb");
+    if (!f)
+        return 2;
+    bool ok = fwrite(data, 1, len, f) == len;
+    fclose(f);
+    return ok ? 0 : 2;
+}
+
+/* Module identity for the CLI: a specifier's base name without directory or a
+ * trailing .js/.jsbc extension (so "./util.js" and "util" both map to "util"),
+ * written as UTF-16 into `out` (cap units); returns the length. */
+static size_t spec_base(const uint16_t *spec, size_t n, uint16_t *out, size_t cap) {
+    size_t start = 0, end = n;
+    for (size_t i = 0; i < n; i++)
+        if (spec[i] == '/')
+            start = i + 1;
+    /* strip a trailing .js or .jsbc */
+    static const char *exts[] = {".jsbc", ".js"};
+    for (int e = 0; e < 2; e++) {
+        size_t el = strlen(exts[e]);
+        if (end - start > el) {
+            bool match = true;
+            for (size_t i = 0; i < el; i++)
+                if (spec[end - el + i] != (uint16_t)exts[e][i])
+                    match = false;
+            if (match) {
+                end -= el;
+                break;
+            }
+        }
+    }
+    size_t m = 0;
+    for (size_t i = start; i < end && m < cap; i++)
+        out[m++] = spec[i];
+    return m;
+}
+
+/* ---- bytecode module resolver (reads sibling <base>.jsbc from root dir) ---- */
+
+#define MAX_BC_RES 64
+static uint8_t *g_bc_buf[MAX_BC_RES];
+static uint16_t *g_bc_spec[MAX_BC_RES];
+static int g_bc_count;
+
+static bool bc_file_resolver(void *ud, const uint16_t *spec, size_t spec_len,
+                             const uint16_t *ref, size_t ref_len, const uint16_t **out_spec,
+                             size_t *out_spec_len, const uint8_t **out_bc, size_t *out_len) {
+    (void)ud;
+    (void)ref;
+    (void)ref_len;
+    if (g_bc_count >= MAX_BC_RES)
+        return false;
+    uint16_t base[256];
+    size_t bn = spec_base(spec, spec_len, base, 256);
+    char path[2048];
+    char name[512];
+    size_t nn = bn < 500 ? bn : 500;
+    for (size_t i = 0; i < nn; i++)
+        name[i] = (char)(base[i] < 128 ? base[i] : '_');
+    name[nn] = 0;
+    snprintf(path, sizeof path, "%s/%s.jsbc", g_root_dir, name);
+
+    size_t bl;
+    uint8_t *bytes = read_file(path, &bl);
+    if (!bytes)
+        return false;
+    uint16_t *sp = malloc((bn + 1) * sizeof(uint16_t));
+    for (size_t i = 0; i < bn; i++)
+        sp[i] = base[i];
+    g_bc_buf[g_bc_count] = bytes;   /* freed at exit (CLI simplicity) */
+    g_bc_spec[g_bc_count] = sp;
+    g_bc_count++;
+    *out_spec = sp;
+    *out_spec_len = bn;
+    *out_bc = bytes;
+    *out_len = bl;
+    return true;
+}
+
+/*
+ * jsvm --emit-bytecode SRC OUT: compile SRC (a non-module script) and write a
+ * validated-on-load bytecode cache to OUT.
+ */
+static int emit_bytecode(const char *src_path, const char *out_path) {
+    size_t byte_len;
+    uint8_t *bytes = read_file(src_path, &byte_len);
+    if (!bytes) {
+        fprintf(stderr, "jsvm: cannot read %s\n", src_path);
+        return 2;
+    }
+    size_t len;
+    uint16_t *src = utf8_to_utf16(bytes, byte_len, &len);
+    free(bytes);
+    if (!src) {
+        fprintf(stderr, "jsvm: out of memory\n");
+        return 2;
+    }
+    JsVm *vm = js_vm_new(NULL);
+    JsContext *ctx = js_context_new(vm);
+    if (!vm || !ctx) {
+        fprintf(stderr, "jsvm: out of memory\n");
+        return 2;
+    }
+    const char *err_msg;
+    uint32_t err_pos;
+    JsValue fn = js_compile_module(ctx, src, len, &err_msg, &err_pos);
+    int status = 0;
+    bool is_module = !js_is_function(fn) && err_msg && strstr(err_msg, "module loader");
+    uint8_t *out = NULL;
+    size_t out_len = 0;
+    bool have = false;
+
+    if (is_module) {
+        /* compile as a standalone module (body + link metadata, no deps) */
+        uint16_t spec[256];
+        size_t sn = spec_base(src, len, spec, 256); /* identity = file base name */
+        have = js_bytecode_compile_module(ctx, spec, sn, src, len, &out, &out_len,
+                                          &err_msg, &err_pos);
+        if (!have) {
+            uint32_t line, col;
+            js_source_line_col(src, len, err_pos, &line, &col);
+            fprintf(stderr, "%s:%u:%u: %s\n", src_path, line, col,
+                    err_msg ? err_msg : "module compile error");
+            status = 1;
+        }
+    } else if (!js_is_function(fn)) {
+        uint32_t line, col;
+        js_source_line_col(src, len, err_pos, &line, &col);
+        fprintf(stderr, "%s:%u:%u: SyntaxError: %s\n", src_path, line, col, err_msg);
+        status = 1;
+    } else {
+        js_gc_protect(vm, &fn);
+        have = js_bytecode_serialize(ctx, fn, &out, &out_len);
+        if (!have) {
+            fprintf(stderr, "jsvm: bytecode serialization failed\n");
+            status = 2;
+        }
+        js_gc_unprotect(vm, &fn);
+    }
+
+    if (have) {
+        status = write_file(out_path, out, out_len);
+        if (status)
+            fprintf(stderr, "jsvm: cannot write %s\n", out_path);
+        js_bytecode_free(ctx, out, out_len);
+    }
+    js_vm_free(vm);
+    free(src);
+    return status;
+}
+
+/* jsvm --run-bytecode FILE.jsbc: load, validate, and run a bytecode cache. */
+static int run_bytecode(const char *path) {
+    size_t len;
+    uint8_t *bytes = read_file(path, &len);
+    if (!bytes) {
+        fprintf(stderr, "jsvm: cannot read %s\n", path);
+        return 2;
+    }
+    JsVm *vm = js_vm_new(NULL);
+    JsContext *ctx = js_context_new(vm);
+    if (!vm || !ctx) {
+        fprintf(stderr, "jsvm: out of memory\n");
+        free(bytes);
+        return 2;
+    }
+    static const uint16_t print_name[] = {'p', 'r', 'i', 'n', 't'};
+    js_register_native(ctx, print_name, 5, native_print, NULL);
+
+    int status = 0;
+    int kind = js_bytecode_kind(bytes, len);
+
+    if (kind == 1 /* JS_BC_MODULE */) {
+        /* Module: dependencies load from sibling <base>.jsbc files. */
+        set_root_dir(path);
+        js_set_bytecode_resolver(ctx, bc_file_resolver, NULL);
+        uint16_t spec[256];
+        /* build a UTF-16 view of the path, then take its base name as identity */
+        uint16_t pathu[2048];
+        size_t pn = 0;
+        for (const char *p = path; *p && pn < 2048; p++)
+            pathu[pn++] = (uint16_t)(unsigned char)*p;
+        size_t sn = spec_base(pathu, pn, spec, 256);
+        const char *err_msg;
+        uint32_t err_pos;
+        bool ok;
+        JsValue ns = js_eval_module_bytecode(ctx, spec, sn, bytes, len, &ok, &err_msg, &err_pos);
+        free(bytes);
+        if (!ok) {
+            fprintf(stderr, "%s: %s\n", path, err_msg ? err_msg : "module error");
+            if (js_is_string(ns) || js_is_object(ns)) {
+                js_gc_protect(vm, &ns);
+                JsValue s = js_to_string(ctx, ns);
+                size_t sl;
+                const uint16_t *su = js_string_units(s, &sl);
+                if (su)
+                    print_utf16(stderr, su, sl);
+                fputc('\n', stderr);
+                js_gc_unprotect(vm, &ns);
+            }
+            status = 1;
+        } else {
+            /* a page template can `export default` its rendered string */
+            static const uint16_t dflt[] = {'d','e','f','a','u','l','t'};
+            JsValue def = js_module_get_export(ctx, ns, dflt, 7);
+            if (!js_is_undefined(def)) {
+                js_gc_protect(vm, &def);
+                JsValue s = js_to_string(ctx, def);
+                size_t sl;
+                const uint16_t *su = js_string_units(s, &sl);
+                if (su)
+                    print_utf16(stdout, su, sl);
+                fputc('\n', stdout);
+                js_gc_unprotect(vm, &def);
+            }
+        }
+        js_vm_free(vm);
+        return status;
+    }
+
+    const char *err_msg;
+    JsValue fn = js_bytecode_load(ctx, bytes, len, &err_msg);
+    free(bytes);
+    if (!js_is_function(fn)) {
+        fprintf(stderr, "%s: %s\n", path, err_msg ? err_msg : "invalid bytecode");
+        status = 1;
+    } else {
+        js_gc_protect(vm, &fn);
+        JsValue result;
+        bool ok = js_run_module(ctx, fn, &result);
+        js_gc_protect(vm, &result);
+        JsValue str = js_to_string(ctx, result);
+        size_t slen;
+        const uint16_t *su = js_string_units(str, &slen);
+        if (ok) {
+            if (su)
+                print_utf16(stdout, su, slen);
+            fputc('\n', stdout);
+        } else {
+            fprintf(stderr, "%s: uncaught ", path);
+            if (su)
+                print_utf16(stderr, su, slen);
+            fputc('\n', stderr);
+            status = 1;
+        }
+    }
+    js_vm_free(vm);
+    return status;
+}
+
 int main(int argc, char **argv) {
     if (argc == 1)
         return run_repl(); /* no file: interactive REPL */
+    if (argc == 4 && strcmp(argv[1], "--emit-bytecode") == 0)
+        return emit_bytecode(argv[2], argv[3]);
+    if (argc == 3 && strcmp(argv[1], "--run-bytecode") == 0)
+        return run_bytecode(argv[2]);
     if (argc != 2) {
-        fprintf(stderr, "usage: jsvm [file.js]   (no file starts a REPL)\n");
+        fprintf(stderr,
+                "usage: jsvm [file.js]                 run a source file (or REPL if omitted)\n"
+                "       jsvm --emit-bytecode SRC OUT   compile SRC to a bytecode cache OUT\n"
+                "       jsvm --run-bytecode FILE       run a bytecode cache\n");
         return 2;
     }
     size_t byte_len;

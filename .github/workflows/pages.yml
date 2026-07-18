@@ -1,8 +1,8 @@
 name: Deploy playground to GitHub Pages
 
-# Builds the jsvm engine to WebAssembly with Emscripten and publishes the
-# web/ playground to GitHub Pages. Enable Pages in repo Settings → Pages with
-# "Source: GitHub Actions" for this to deploy.
+# Builds the engine to WebAssembly (Emscripten), builds the Vite playground
+# against the workspace package, and publishes it to GitHub Pages. Enable Pages
+# in repo Settings → Pages with "Source: GitHub Actions" for this to deploy.
 
 on:
   push:
@@ -23,28 +23,42 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout (with submodules — the regex engine lives in third_party)
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Set up Emscripten
         uses: mymindstorm/setup-emsdk@v14
         with:
-          version: 3.1.74
+          version: latest
           actions-cache-folder: emsdk-cache
 
-      - name: Verify toolchain
-        run: emcc --version
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
 
-      - name: Build WebAssembly playground
-        run: make web
+      - name: Verify toolchain
+        run: emcc --version && node --version
+
+      - name: Build the WebAssembly package (packages/lamassu-js/dist)
+        run: make pkg
+
+      - name: Install workspace dependencies
+        run: npm ci
+
+      - name: Build the Vite playground (web/dist)
+        run: npm run build:web
 
       - name: Sanity-check the artifacts exist
-        run: test -f web/jsvm.js && test -f web/jsvm.wasm && test -f web/index.html
+        run: test -f web/dist/index.html && ls web/dist/assets/*.wasm
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: web
+          path: web/dist
 
   deploy:
     needs: build

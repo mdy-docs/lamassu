@@ -1,0 +1,58 @@
+name: Publish package to npm
+
+# Publishes @mdy-docs/lamassu-js (the wasm + JS shim) to npm. Triggered by
+# publishing a GitHub Release, or manually. Requires an NPM_TOKEN secret
+# (Settings → Secrets and variables → Actions) with publish rights to the
+# @mdy-docs scope. The package's dist/ (lamassu.mjs + lamassu.wasm) is built
+# fresh here — it is gitignored, never committed.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Pack only, do not publish"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: latest
+          actions-cache-folder: emsdk-cache
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Build the WebAssembly package artifact
+        run: make pkg
+
+      - name: Verify the artifact loads and evaluates
+        run: node .github/scripts/smoke.mjs
+
+      - name: Pack (dry run)
+        working-directory: packages/lamassu-js
+        run: npm pack --dry-run
+
+      - name: Publish to npm
+        if: github.event_name == 'release' || inputs.dry-run == false
+        working-directory: packages/lamassu-js
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -318,8 +318,8 @@ static void test_errors(void) {
     expect_error("let x = 1; x.y = 2;", RUN_RUNTIME_ERR, "primitive");
     expect_error("1 in 2;", RUN_RUNTIME_ERR, "requires an object");
     expect_error("for (const x of 42) {}", RUN_RUNTIME_ERR, "not iterable");
-    /* phase gates still ahead */
-    expect_error("let r = /a/;", RUN_COMPILE_ERR, "phase 10");
+    /* regex landed (phase 10): a literal now evaluates to an object */
+    expect_result("let r = /a+/; r.source;", "a+");
     expect_error("import 'm';", RUN_COMPILE_ERR, "module loader");
     expect_error("let x = await y;", RUN_RUNTIME_ERR, "y is not defined");
 }

@@ -241,6 +241,93 @@ JsValue js_module_get_export(JsContext *ctx, JsValue ns, const uint16_t *name,
 /* ToString for host display; undefined on OOM. */
 JsValue js_to_string(JsContext *ctx, JsValue v);
 
+/* ---- bytecode serialization (phase 8) ---- */
+
+/*
+ * Serializes a compiled top-level function (from js_compile_module — NOT a
+ * module body; import/export bytecode is not portable) into a self-describing
+ * byte buffer. On success returns true with *out / *out_len set to a buffer
+ * owned by the VM allocator; free it with js_bytecode_free. Returns false on
+ * OOM or if fn is not a plain compiled function.
+ *
+ * The format is versioned and carries no source; runtime error positions
+ * survive (line table is included) but mapping them to line:col needs the
+ * original source. The byte order is canonical (little-endian), so a cache
+ * is portable across machines of the same pointer width.
+ */
+bool js_bytecode_serialize(JsContext *ctx, JsValue fn, uint8_t **out, size_t *out_len);
+void js_bytecode_free(JsContext *ctx, uint8_t *buf, size_t len);
+
+/*
+ * Loads and fully validates a bytecode buffer produced by
+ * js_bytecode_serialize, returning a runnable function value (root it, then
+ * js_run_module it like a freshly compiled one). Returns undefined with
+ * *err_msg (static ASCII) set on ANY structural problem — bad magic/version,
+ * truncation, out-of-range constant/local/upvalue indices, jump targets off
+ * an instruction boundary, stack underflow/overflow, or a missing terminator.
+ * The loader assumes the input may be corrupt or hostile: a rejected buffer
+ * never yields an executable function, so a tampered cache cannot become
+ * undefined behavior in the interpreter.
+ */
+JsValue js_bytecode_load(JsContext *ctx, const uint8_t *buf, size_t len,
+                         const char **err_msg);
+
+/* ---- module bytecode (phase 8, modules) ---- */
+
+/*
+ * Compiles ONE module (import/export source) to a bytecode buffer WITHOUT
+ * resolving, linking, or evaluating it — so each page/partial can be compiled
+ * independently and cached. The buffer records the module's body plus its link
+ * metadata (import descriptors, star re-exports, dependency specifiers); the
+ * resolved dependency modules and live exports are runtime state rebuilt at
+ * load. `specifier` becomes the module's identity/cache key. On success
+ * returns true with *out / *out_len (free via js_bytecode_free); on a
+ * parse/compile error returns false with *err_msg / *err_pos set.
+ *
+ * A module buffer is distinct from a script buffer (js_bytecode_serialize):
+ * js_bytecode_load rejects a module buffer and js_eval_module_bytecode rejects
+ * a script buffer, so the two can't be confused.
+ */
+bool js_bytecode_compile_module(JsContext *ctx, const uint16_t *specifier,
+                                size_t spec_len, const uint16_t *source,
+                                size_t source_len, uint8_t **out, size_t *out_len,
+                                const char **err_msg, uint32_t *err_pos);
+
+/*
+ * Host bytecode resolver — the module-bytecode analogue of JsModuleResolver:
+ * given an import `specifier` and its `referrer`, return the dependency
+ * module's compiled bytecode (not source). Write a canonical specifier to
+ * *out_specifier (the cache/identity key) and the buffer to *out_bytecode /
+ * *out_len. Return true on success, false if not found. Buffers must stay
+ * valid until the call returns (the engine copies what it needs).
+ */
+typedef bool (*JsBytecodeResolver)(void *ud, const uint16_t *specifier, size_t spec_len,
+                                   const uint16_t *referrer, size_t ref_len,
+                                   const uint16_t **out_specifier, size_t *out_spec_len,
+                                   const uint8_t **out_bytecode, size_t *out_len);
+
+void js_set_bytecode_resolver(JsContext *ctx, JsBytecodeResolver fn, void *ud);
+
+/*
+ * Reports what a bytecode buffer holds without loading it: 0 = a script
+ * (js_bytecode_load / js_run_module), 1 = a module (js_eval_module_bytecode),
+ * negative = not valid bytecode. Lets a host dispatch a `.jsbc` file correctly.
+ */
+int js_bytecode_kind(const uint8_t *buf, size_t len);
+
+/*
+ * Loads, validates, links, and evaluates a root module from bytecode, pulling
+ * its dependencies in through the bytecode resolver (set it first, unless the
+ * root has no imports). Same result contract as js_eval_module: the namespace
+ * object on success, or undefined with err_msg/err_pos on a load/link error,
+ * or the thrown value with *ok = false. Every loaded module buffer is fully
+ * validated (including import-index bounds the interpreter trusts), so a
+ * tampered module cache cannot become undefined behavior.
+ */
+JsValue js_eval_module_bytecode(JsContext *ctx, const uint16_t *specifier,
+                                size_t spec_len, const uint8_t *bytecode, size_t len,
+                                bool *ok, const char **err_msg, uint32_t *err_pos);
+
 /* ---- GC ---- */
 
 void   js_gc_collect(JsVm *vm);

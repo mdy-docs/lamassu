@@ -1,4 +1,7 @@
 #include "js_bytecode.h"
+#ifdef JSVM_HAS_REGEX
+#include "js_regexp.h"
+#endif
 
 /*
  * Bytecode interpreter. All execution state lives in a JsFiber (a GC cell
@@ -53,6 +56,9 @@ bool js_to_boolean(JsValue v) {
 }
 
 static bool is_nullish(JsValue v) { return js_is_undefined(v) || js_is_null(v); }
+static bool is_array(JsValue v) {
+    return js_is_object(v) && js_value_object(v)->obj_kind == JS_OBJ_ARRAY;
+}
 
 JsString *js_to_string_cell(JsContext *ctx, JsValue v, int depth) {
     JsVm *vm = ctx->vm;
@@ -74,6 +80,10 @@ JsString *js_to_string_cell(JsContext *ctx, JsValue v, int depth) {
         return js_ascii_cell(vm, "[object Promise]");
     if (js_is_object(v)) {
         JsObject *o = js_value_object(v);
+#ifdef JSVM_HAS_REGEX
+        if (o->obj_kind == JS_OBJ_REGEXP)
+            return js_regexp_repr(ctx, o);
+#endif
         if (o->obj_kind != JS_OBJ_ARRAY)
             return js_ascii_cell(vm, "[object Object]");
         if (depth >= JS_TOSTRING_MAX_DEPTH)
@@ -356,6 +366,16 @@ static JsPropStatus get_property(JsContext *ctx, JsValue base, JsValue key,
     }
     if (js_is_object(base)) {
         JsObject *o = js_value_object(base);
+#ifdef JSVM_HAS_REGEX
+        if (o->obj_kind == JS_OBJ_REGEXP) {
+            /* synthesized props (source, lastIndex, ...) shadow everything */
+            bool handled = false;
+            if (!js_regexp_prop_get(ctx, o, key, out, &handled))
+                return JS_PROP_OOM;
+            if (handled)
+                return JS_PROP_OK;
+        }
+#endif
         if (o->obj_kind == JS_OBJ_ARRAY) {
             uint32_t idx;
             if (key_to_index(key, &idx)) {
@@ -381,6 +401,10 @@ static JsPropStatus get_property(JsContext *ctx, JsValue base, JsValue key,
         }
         if (o->obj_kind == JS_OBJ_ARRAY)
             return method_lookup(ctx, ctx->array_methods, key, out);
+#ifdef JSVM_HAS_REGEX
+        if (o->obj_kind == JS_OBJ_REGEXP)
+            return method_lookup(ctx, ctx->regexp_methods, key, out);
+#endif
         return JS_PROP_OK;
     }
     if (js_is_number(base))
@@ -408,6 +432,15 @@ static JsPropStatus set_property(JsContext *ctx, JsValue base, JsValue key,
         return JS_PROP_TYPE_ERROR;
     }
     JsObject *o = js_value_object(base);
+#ifdef JSVM_HAS_REGEX
+    if (o->obj_kind == JS_OBJ_REGEXP) {
+        bool handled = false;
+        if (!js_regexp_prop_set(ctx, o, key, val, &handled, errmsg))
+            return JS_PROP_TYPE_ERROR;
+        if (handled)
+            return JS_PROP_OK;
+    }
+#endif
     if (o->obj_kind == JS_OBJ_ARRAY) {
         uint32_t idx;
         if (key_to_index(key, &idx)) {
@@ -1222,6 +1255,27 @@ run:; /* (re)load the top frame */
                 PUSH(o);
                 break;
             }
+            case JS_OP_NEW_REGEXP: {
+                uint16_t csrc = READ_U16();
+                uint16_t cflags = READ_U16();
+#ifdef JSVM_HAS_REGEX
+                /* pattern/flag atoms stay alive as consts of the running fn */
+                JsString *src = js_value_string(K[csrc]);
+                JsString *flg = js_value_string(K[cflags]);
+                fr->ip = ip; /* GC-safe point: construction allocates */
+                const char *em = NULL;
+                JsValue re = js_regexp_new(ctx, src->units, src->length,
+                                           flg->units, flg->length, &em);
+                if (!js_is_object(re))
+                    RT_THROW(em ? em : "out of memory");
+                PUSH(re);
+#else
+                (void)csrc;
+                (void)cflags;
+                RT_THROW("SyntaxError: regex support is not compiled into this build");
+#endif
+                break;
+            }
             case JS_OP_NEW_ARRAY: {
                 uint16_t count = READ_U16();
                 JsObject *a = js_array_new_cell(vm, count);
@@ -1235,6 +1289,13 @@ run:; /* (re)load the top frame */
                 break;
             }
             case JS_OP_ARRAY_APPEND: {
+                /* PEEK(1) is the array under construction. The compiler always
+                 * emits this after NEW_ARRAY, but validated-yet-hostile
+                 * bytecode (a depth-preserving swap of NEW_ARRAY for another
+                 * +1 op) could put a non-array here; guard the cast so loaded
+                 * bytecode can never turn a bad type into a wild pointer. */
+                if (!is_array(PEEK(1)))
+                    RT_THROW("internal error: array builder on non-array");
                 JsObject *a = js_value_object(PEEK(1));
                 if (!js_array_append(vm, a, PEEK(0)))
                     RT_THROW("out of memory");
@@ -1243,6 +1304,8 @@ run:; /* (re)load the top frame */
             }
             case JS_OP_ARRAY_SPREAD: {
                 JsValue src = PEEK(0);
+                if (!is_array(PEEK(1)))
+                    RT_THROW("internal error: array builder on non-array");
                 JsObject *a = js_value_object(PEEK(1));
                 if (js_is_object(src) && js_value_object(src)->obj_kind == JS_OBJ_ARRAY) {
                     JsObject *s = js_value_object(src);
@@ -1294,6 +1357,8 @@ run:; /* (re)load the top frame */
                 break;
             }
             case JS_OP_OBJ_SPREAD: {
+                if (!js_is_object(PEEK(1)))
+                    RT_THROW("internal error: object builder on non-object");
                 JsObject *dst = js_value_object(PEEK(1));
                 if (!js_spread_into_object(ctx, dst, PEEK(0)))
                     RT_THROW("out of memory");
@@ -1414,6 +1479,11 @@ run:; /* (re)load the top frame */
                     PEEK(0) = js_number((double)(i + n));
                     PUSH(js_value_from_cell(&c->gc));
                 } else {
+                    /* ITER_NEW only pushes string/array iterators; guard the
+                     * cast against hostile bytecode that reaches ITER_NEXT
+                     * with some other value in the iterator slot */
+                    if (!is_array(it))
+                        RT_THROW("TypeError: value is not iterable");
                     JsObject *a = js_value_object(it);
                     if (i >= a->elem_count) {
                         fb->sp -= 2;
@@ -1460,6 +1530,10 @@ run:; /* (re)load the top frame */
                     argc = code[ip++];
                 } else {
                     JsValue arrv = PEEK(0);
+                    /* the args array is compiler-built; guard for hostile
+                     * bytecode that reaches CALL_VARARGS without one */
+                    if (!is_array(arrv))
+                        RT_THROW("internal error: varargs call on non-array");
                     JsObject *arr = js_value_object(arrv);
                     argc = arr->elem_count;
                     fb->sp--; /* drop the array */

@@ -67,6 +67,7 @@ typedef struct JsMap {
 typedef enum JsObjKind {
     JS_OBJ_PLAIN = 0,
     JS_OBJ_ARRAY = 1,
+    JS_OBJ_REGEXP = 2, /* JsRegExp (js_regexp.h); only when JSVM_HAS_REGEX */
 } JsObjKind;
 
 typedef struct JsObject {
@@ -316,6 +317,7 @@ struct JsContext {
     JsObject *array_methods;
     JsObject *number_methods;
     JsObject *promise_methods;
+    JsObject *regexp_methods; /* NULL unless built with JSVM_HAS_REGEX */
     /* persistent REPL lexical scope: top-level let/const/function bindings
      * that survive across evaluations. repl_scope holds values (TDZ sentinel
      * for uninitialized); repl_const marks the const names. Both lazily
@@ -327,6 +329,8 @@ struct JsContext {
     uint32_t module_count, module_cap;
     JsModuleResolver resolver;
     void *resolver_ud;
+    JsBytecodeResolver bc_resolver; /* module-bytecode dep resolver; may be NULL */
+    void *bc_resolver_ud;
     JsFiber *fiber;     /* current/last fiber; GC root */
     uint64_t fuel;      /* budget for new runs; 0 = unlimited */
     uint32_t error_pos; /* source offset of last runtime error */
@@ -338,6 +342,7 @@ struct JsVm {
     size_t bytes_live; /* all bytes obtained through js_realloc_raw */
     size_t heap_limit; /* 0 = unlimited; enforced at cell allocation */
     uint64_t rng_state; /* Math.random xorshift state */
+    uint32_t regexp_live; /* live compiled patterns (each ~sizeof(Program)) */
 
     /* GC */
     JsGcCell *cells;

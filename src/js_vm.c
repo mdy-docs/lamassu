@@ -115,12 +115,15 @@ JsContext *js_context_new(JsVm *vm) {
     ctx->array_methods = NULL;
     ctx->number_methods = NULL;
     ctx->promise_methods = NULL;
+    ctx->regexp_methods = NULL;
     ctx->repl_scope = NULL;
     ctx->repl_const = NULL;
     ctx->modules = NULL;
     ctx->module_count = ctx->module_cap = 0;
     ctx->resolver = NULL;
     ctx->resolver_ud = NULL;
+    ctx->bc_resolver = NULL;
+    ctx->bc_resolver_ud = NULL;
     ctx->fiber = NULL;
     ctx->fuel = 0;
     ctx->error_pos = 0;
@@ -158,6 +161,11 @@ void js_context_free(JsContext *ctx) {
 void js_set_module_resolver(JsContext *ctx, JsModuleResolver fn, void *ud) {
     ctx->resolver = fn;
     ctx->resolver_ud = ud;
+}
+
+void js_set_bytecode_resolver(JsContext *ctx, JsBytecodeResolver fn, void *ud) {
+    ctx->bc_resolver = fn;
+    ctx->bc_resolver_ud = ud;
 }
 
 JsValue js_context_globals(JsContext *ctx) {

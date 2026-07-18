@@ -1,5 +1,8 @@
 #include "js_bytecode.h" /* js_gc_mark_jobs */
 #include "jsvm_internal.h"
+#ifdef JSVM_HAS_REGEX
+#include "js_regexp.h"
+#endif
 
 /*
  * Stop-the-world mark-sweep. Marking uses an explicit stack (no C
@@ -52,6 +55,10 @@ static void js_gc_trace(JsVm *vm) {
             }
             for (uint32_t i = 0; i < o->elem_count; i++)
                 js_gc_mark_value(vm, o->elems[i]);
+#ifdef JSVM_HAS_REGEX
+            if (o->obj_kind == JS_OBJ_REGEXP)
+                js_regexp_mark(vm, o);
+#endif
             break;
         }
         case JS_KIND_FUNCTION: {
@@ -144,6 +151,10 @@ void js_gc_free_cell(JsVm *vm, JsGcCell *c, bool remove_atoms) {
         js_map_free(vm, &o->props);
         js_realloc_raw(vm, o->elems, (size_t)o->elem_cap * sizeof(JsValue), 0);
         size = sizeof *o;
+#ifdef JSVM_HAS_REGEX
+        if (o->obj_kind == JS_OBJ_REGEXP)
+            size = js_regexp_release(vm, o);
+#endif
         break;
     }
     case JS_KIND_FUNCTION: {
@@ -211,6 +222,8 @@ void js_gc_collect(JsVm *vm) {
             js_gc_mark_cell(vm, &ctx->number_methods->gc);
         if (ctx->promise_methods)
             js_gc_mark_cell(vm, &ctx->promise_methods->gc);
+        if (ctx->regexp_methods)
+            js_gc_mark_cell(vm, &ctx->regexp_methods->gc);
         if (ctx->repl_scope)
             js_gc_mark_cell(vm, &ctx->repl_scope->gc);
         if (ctx->repl_const)

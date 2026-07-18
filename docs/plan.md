@@ -18,12 +18,23 @@ language.
 - A native command-line tool (`jsvm`) that compiles and runs a JavaScript
   file — both a developer convenience and the harness the script-level and
   differential test suites drive.
-- A browser playground (`web/`) — the engine built to WebAssembly with
-  Emscripten (`make web` → `web/jsvm.{js,wasm}`), a REPL page with runnable
-  samples, deployed to GitHub Pages by `.github/workflows/pages.yml`. The
-  REPL keeps a persistent VM so state carries across runs; a `print()` native
-  captures output. The `web` build is non-freestanding (Emscripten supplies
-  libc); the freestanding `wasm` target remains the embeddable core.
+- An **npm package** (`@mdy-docs/lamassu-js`, `packages/lamassu-js/`) — the
+  engine's REPL surface built to a WebAssembly **ES module** by Emscripten
+  (`make pkg` → `packages/lamassu-js/dist/lamassu.{mjs,wasm}`, `-sEXPORT_ES6`),
+  plus a small typed ESM wrapper (`index.js` + `index.d.ts`) exposing
+  `createLamassu() → { eval, reset }`. The published tarball is the `.wasm` +
+  the shim; the `.wasm` is a real asset (never base64-inlined), located via
+  `import.meta.url` in native ESM or an explicit `wasmUrl` under a bundler.
+  Published to npm by `.github/workflows/npm-publish.yml` (gated on a Node
+  smoke test that instantiates the artifact and evaluates).
+- A browser playground (`web/`) — a **Vite** app that imports the package and
+  drives an editor + REPL with runnable samples, deployed to GitHub Pages by
+  `.github/workflows/pages.yml` (build wasm → `npm ci` → `vite build` →
+  deploy `web/dist`). The REPL keeps a persistent VM so state carries across
+  runs; a `print()` native captures output. The repo is an npm-workspaces
+  monorepo (`packages/*` + `web`). The Emscripten build is non-freestanding
+  (it supplies libc); the freestanding `wasm` target remains the embeddable
+  core.
 - A **persistent lexical environment** for REPL sessions
   (`js_compile_module_repl`): top-level `let`/`const`/`function` bindings
   live in a per-context lexical scope (values + a const-marker set) that
@@ -52,7 +63,7 @@ language.
 |---|---|---|
 | Host environment | Multiple / undecided | Core must be host-agnostic; per-target glue layers. |
 | Syntax scope | Basics + template literals, try/catch/throw, destructuring & spread, regex | Regex is feature-flagged and integrated last. |
-| Regex engine | Reuse [`third_party/regex-engine`](../third_party/regex-engine) (git submodule) | ECMAScript-flavored compiler + backtracking VM extracted from jsvm2; we write the binding layer, not the engine. |
+| Regex engine | Reuse [`third_party/baru-re`](../third_party/baru-re) (git submodule) | ECMAScript-flavored compiler + backtracking VM extracted from jsvm2; we write the binding layer, not the engine. |
 | String encoding | UTF-16 everywhere internally | Never raw NUL-terminated C strings; all string data is `uint16_t*` + code-unit length. Matches JS `.length`/indexing semantics and the regex engine's native format. |
 | Language mode | Strict mode only | All source compiles as an ES module (modules are strict by spec). No sloppy mode exists anywhere in the engine. |
 | Declarations | `let`/`const` only — no `var` | `var` stays a reserved word with a targeted error: `'var' is not supported; use 'let' or 'const'`. Never aliased to `let` (semantics differ). |
@@ -105,8 +116,9 @@ Working in AI-assisted sessions:
   try/catch): ~1 week of sessions.
 - **Feature-complete** (+ async/await, modules, destructuring, bytecode
   serialization): ~2–3 weeks.
-- **Regex**: 1–2 sessions to integrate `third_party/regex-engine` (binding layer +
-  step-budget hardening), deliberately last, behind a compile flag.
+- **Regex**: ✅ integrated (`third_party/baru-re` behind `JSVM_HAS_REGEX`),
+  including the engine-side step budget (catchable RangeError on
+  catastrophic backtracking).
 - **Hardening tail** (fuzzing, sanitizers, differential testing): a few weeks
   of mostly background machine time.
 
@@ -238,23 +250,44 @@ Users are untrusted; this shapes several choices:
   additionally enforce CPU and memory limits externally (e.g. wasmtime epoch
   interruption + memory caps). In-VM limits are defense-in-depth and exist to
   produce graceful errors rather than killed instances.
-- **Regex is the ReDoS hole.** Bytecode fuel metering does not cover a
-  backtracking regex engine running in a native C loop — `/(a+)+$/` would hang
-  the VM from inside. `third_party/regex-engine` is a backtracking VM with
-  **no internal step limit** (verified: no fuel/step/timeout in `regexp.c`),
-  so our integration must add one — either a step counter patched into
-  `vm_execute_internal` (upstreamable) or, minimally, reliance on host-level
-  interruption (wasmtime epochs) with the caveat that a hung regex kills the
-  whole instance rather than throwing a catchable error.
+- **Regex is the ReDoS hole — closed by the engine step budget.** Bytecode
+  fuel metering does not cover a backtracking regex engine running in a
+  native C loop; `/(a+)+$/` against a few hundred characters was a
+  confirmed hang (the engine's fail cache is direct-mapped and
+  counter-keyed states defeat it). The fix is **in baru-re itself**:
+  `vm_context_set_step_budget` / `vm_context_budget_exhausted` on
+  `VMContext` (default 0 = unlimited, so other engine consumers are
+  unaffected), counting every VM instruction — plus the O(length) work of
+  backreference compares — across all start positions and lookaround
+  recursion of one exec call. The binding (`src/js_regexp.c`) sets
+  `JS_REGEXP_STEP_BASE + JS_REGEXP_STEPS_PER_UNIT × subject_length` per
+  match call and surfaces exhaustion as a catchable
+  `RangeError: regular expression step budget exhausted` (regression-tested
+  in `test/test_regex.c` and baru-re's `test/smoke.c`). Note the engine's
+  WASM shim (`regex_exec`) still runs unlimited by default — its consumers
+  opt in the same way.
 - **Regex memory footprint.** A compiled `Program` is a large fixed-size
   struct (multi-megabyte; `MAX_OPCODES`/`MAX_CLASSES`/`MAX_GROUPS` in
   `regexp.h` are generous fixed bounds). Untrusted scripts compiling many
   distinct patterns is a memory-exhaustion vector: cap live compiled patterns
   per context, and consider shrinking the `MAX_*` constants for our build.
-- **The bytecode loader validates.** Serialized bytecode means the interpreter
-  can receive bytes the compiler didn't just produce. Structural validation on
-  load (jump targets in range, constant/register indices bounded, arity sane)
-  keeps a corrupted or tampered cache from becoming undefined behavior.
+- **The bytecode loader validates — done (phase 8).** Serialized bytecode
+  means the interpreter can receive bytes the compiler didn't just produce.
+  `js_bytecode_load` (`src/js_serialize.c`) treats its input as hostile: it
+  bounds every constant/local/upvalue index and checks the referenced
+  constant's *kind* (string vs. function), requires jump/branch/GOSUB targets
+  to land on instruction boundaries, requires a non-fall-through terminator,
+  and runs an abstract-interpretation stack-depth pass that proves no
+  underflow/overflow and recomputes `max_stack` from scratch (so a tampered
+  value cannot shrink the interpreter's stack reservation). The pass models
+  the finally-block `GOSUB`/`RET_SUB` subroutine polymorphism (an offset
+  reachable at several depths) as a small per-offset depth set. Because a pure
+  structural/stack verifier cannot prove operand *types*, the few interpreter
+  opcodes that previously trusted the compiler for a type (`ARRAY_APPEND`,
+  `ARRAY_SPREAD`, `OBJ_SPREAD`, `CALL_VARARGS`, `ITER_NEXT`) now guard the
+  cast, so any bytecode that passes validation is memory-safe to run — a
+  single-byte mutation sweep under ASan/UBSan (`test/test_bytecode.c`) is the
+  regression guard.
 - **Stack depth and heap size** are hard-limited per context; allocation goes
   through the injected allocator so the host can meter it.
 
@@ -272,9 +305,9 @@ past phase 7.
 | 5 | ✅ Object/Array/String/Number methods, Math, JSON, statics + global conversions; freestanding math kernel; hidden per-type method tables | 2 |
 | 6 | ✅ Promises, microtask queue, async/await (fiber suspend/resume), Promise.all/race/allSettled, executor, top-level await, host promise API | 1–2 |
 | 7 | ✅ ES modules: compile→instantiate→link→evaluate, host resolver, cyclic/diamond imports, live bindings, star re-export, async modules + TLA | 1–2 |
-| 8 | Bytecode serializer + validating loader; CLI grows `--emit-bytecode`/`--run-bytecode` to round-trip the format | 1 |
+| 8 | ✅ Bytecode serializer + validating loader (`src/js_serialize.c`): versioned `.jsbc` format (magic/version/flags header, recursively-inlined function records, tagged constants); the loader treats input as untrusted and does structural + dataflow verification (bounded const/local/upvalue indices with kind checks, jump targets on instruction boundaries, guaranteed terminator, and an abstract stack-depth pass that proves no under/overflow and recomputes `max_stack` — the stored value is never trusted). The interpreter's array/object-builder and varargs/iterator opcodes were hardened to guard their operand types so any structurally-valid bytecode is safe to execute. **Modules are supported too**: a `.jsbc` carries a script/module kind byte; a module buffer records the body function tree plus link metadata (imports, star re-exports, dependency specifiers), while resolved deps and live exports are runtime state rebuilt on load. `js_bytecode_compile_module` compiles one module independently; `js_eval_module_bytecode` + a `JsBytecodeResolver` load/verify/link/evaluate a graph, deduplicating shared modules by specifier and reusing the phase-7 instantiate→link→evaluate pipeline unchanged — so live bindings, cycles, diamonds, and re-exports all work from bytecode. The loader validates the module opcodes the interpreter trusts (GET_IMPORT/IMPORT_NS import-index bounds) and re-wires every nested function's `->module`. CLI: `--emit-bytecode` auto-detects modules and `--run-bytecode` resolves sibling `<dep>.jsbc` files. Tests: `test/test_bytecode.c` (scripts) + `test/test_module_bc.c` (module graphs vs. source, kind confusion, and a module-record mutation sweep) under ASan/UBSan | 1 |
 | 9 | WASM export surface + example host glue; fuel/memory/stack limits | 1–2 |
-| 10 | Regex: integrate `third_party/regex-engine` — binding layer (RegExp object, match results, named groups), step-budget patch, pattern-count cap; behind a compile flag | 1–2 |
+| 10 | ✅ Regex: integrated `third_party/baru-re` — binding layer (`src/js_regexp.c`: RegExp global + literals, exec/test/toString, lastIndex protocol, match/matchAll/search/replace/replaceAll/split, named groups, `/d` indices), live-pattern cap (64), `JSVM_HAS_REGEX` compile flag (all hosted builds; freestanding wasm stays regex-free), and the engine-side step budget (`vm_context_set_step_budget`, added to baru-re) so catastrophic backtracking throws a catchable RangeError (see "Regex is the ReDoS hole") | 1–2 |
 | opt | Shapes + inline caches for property access (see "Property storage") — only once benchmarks exist | 2–3 |
 | — | Fuzzing (parser + interpreter under ASan/UBSan), differential testing vs Node | background |
 
@@ -300,7 +333,11 @@ later phases.
 - **`Object.freeze` returns the object but does not enforce immutability.**
 - **`Array.from` supports strings and arrays**, not arbitrary array-likes or
   iterators.
-- **`replace`/`split` take string patterns only** (regex arrives in phase 10).
+- **Regex (phase 10) landed**: `String.prototype.match/matchAll/search/replace/
+  replaceAll/split` accept `RegExp` patterns via `src/js_regexp.c`. Two
+  documented simplifications remain — `matchAll` returns an array rather than a
+  lazy iterator (`for-of` behaves identically), and `split` ignores its
+  `limit` argument (as the pre-existing string `split` already did).
 - **No `new`/constructors, no prototype chain** — builtin methods live on
   hidden per-context tables, invisible to scripts. `Promise(executor)` is
   callable without `new` (the subset's deliberate accommodation).
