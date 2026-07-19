@@ -21,7 +21,6 @@
  */
 
 #define JS_MAX_CONCAT_UNITS (64u * 1024 * 1024)
-#define JS_MAX_ARRAY_GAP 4096u
 #define JS_TOSTRING_MAX_DEPTH 8
 
 /* ---- small helpers ---- */

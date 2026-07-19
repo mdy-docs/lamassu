@@ -2077,6 +2077,44 @@ static bool arr_from(JsContext *ctx, JsValue tv, const JsValue *args, int argc, 
     return true;
 }
 
+/* Array(...): callable with or without `new` (see JS_OP_NEW's native-constructor
+ * dispatch — both forms call this the same way, matching real JS's Array).
+ * One numeric argument means "empty array of that length" (spec's special
+ * case); anything else — zero args, or one non-numeric, or several — means
+ * "array of these elements", like Array.of. No holes here (arrays are a
+ * flat JsValue vector — see "Property storage" in docs/plan.md), so a
+ * length past JS_MAX_ARRAY_GAP is refused rather than eagerly filled: same
+ * memory-exhaustion guard as growing an array via index assignment. */
+static bool g_Array(JsContext *ctx, JsValue tv, const JsValue *args, int argc, JsValue *r) {
+    (void)tv;
+    if (argc == 1 && js_is_number(args[0])) {
+        double d = js_get_number(args[0]);
+        /* bounds-check before the cast: (uint32_t)d is UB for d outside
+         * [0, UINT32_MAX], e.g. Array(-1) or Array(1e20) */
+        if (!(d >= 0 && d < 4294967296.0))
+            return native_throw(ctx, r, "RangeError: Invalid array length");
+        uint32_t n = (uint32_t)d;
+        if ((double)n != d)
+            return native_throw(ctx, r, "RangeError: Invalid array length");
+        if (n > JS_MAX_ARRAY_GAP)
+            return native_throw(ctx, r, "RangeError: array length too large");
+        JsObject *out = js_array_new_cell(ctx, n);
+        if (!out)
+            return oom(ctx, r);
+        if (n > 0 && !js_array_set_index(ctx->vm, out, n - 1, js_undefined()))
+            return oom(ctx, r);
+        *r = js_value_from_cell(&out->gc);
+        return true;
+    }
+    JsObject *out = js_array_new_cell(ctx, (uint32_t)argc);
+    if (!out)
+        return oom(ctx, r);
+    for (int i = 0; i < argc; i++)
+        out->elems[out->elem_count++] = args[i];
+    *r = js_value_from_cell(&out->gc);
+    return true;
+}
+
 static bool num_isInteger(JsContext *ctx, JsValue tv, const JsValue *args, int argc, JsValue *r) {
     (void)ctx; (void)tv; (void)argc;
     JsValue v = ARG(0);
@@ -2474,16 +2512,26 @@ bool js_builtins_init(JsContext *ctx) {
         !def_fn(ctx, object, "setPrototypeOf", obj_setPrototypeOf))
         return false;
 
-    /* Array */
-    JsValue arrv = js_object_new(vm);
-    if (!js_is_object(arrv) || !js_object_set_ascii(ctx, ctx->globals, "Array", arrv))
+    /* Array: a callable native (Array(n) / new Array(n) behave identically —
+     * see JS_OP_NEW's native-constructor dispatch), same "real prototype
+     * object" wiring as Date/Map/Set/RegExp below. */
+    JsValue arrv = js_native_new(ctx, "Array", g_Array, NULL);
+    if (!js_is_function(arrv))
         return false;
-    JsObject *array = js_value_object(arrv);
-    if (!def_fn(ctx, array, "isArray", arr_isArray) || !def_fn(ctx, array, "of", arr_of) ||
-        !def_fn(ctx, array, "from", arr_from))
-        return false;
-    if (!js_object_set_ascii(ctx, array, "prototype", js_value_from_cell(&ctx->array_proto->gc)) ||
-        !js_object_set_ascii(ctx, ctx->array_proto, "constructor", arrv))
+    js_gc_protect(vm, &arrv); /* keep rooted through statics + global set */
+    ((JsNative *)js_value_cell(arrv))->prototype = ctx->array_proto;
+    JsValue arr_statics = js_object_new(vm);
+    bool arr_ok = js_is_object(arr_statics);
+    if (arr_ok) {
+        ((JsNative *)js_value_cell(arrv))->statics = js_value_object(arr_statics);
+        JsObject *array = js_value_object(arr_statics);
+        arr_ok = def_fn(ctx, array, "isArray", arr_isArray) && def_fn(ctx, array, "of", arr_of) &&
+                def_fn(ctx, array, "from", arr_from) &&
+                js_object_set_ascii(ctx, ctx->array_proto, "constructor", arrv) &&
+                js_object_set_ascii(ctx, ctx->globals, "Array", arrv);
+    }
+    js_gc_unprotect(vm, &arrv);
+    if (!arr_ok)
         return false;
 
     /* Number: callable conversion + statics */

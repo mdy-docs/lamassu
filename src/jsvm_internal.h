@@ -418,6 +418,14 @@ static inline JsFunctionCell *js_value_function(JsValue v) {
 }
 static inline JsPromise *js_value_promise(JsValue v) { return (JsPromise *)js_value_cell(v); }
 
+/* Largest one-shot growth (by index-assignment gap, or a bare `Array(n)`
+ * length/constructor call) a script may force before hitting a RangeError —
+ * arrays have no holes here, so every slot up to the requested length is
+ * eagerly materialized; this bounds the memory an untrusted script can make
+ * one call allocate. Shared by js_interp.c (property-set path) and
+ * js_builtins.c (the Array constructor). */
+#define JS_MAX_ARRAY_GAP 4096u
+
 /* js_object.c: array helpers used by the interpreter. new_cell takes the
  * context (not just the VM) so it can set the new array's [[Prototype]] to
  * ctx->array_proto — real arrays, not the "no [[Prototype]] at all" that a
