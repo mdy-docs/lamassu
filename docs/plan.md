@@ -17,10 +17,11 @@ language.
     (no C stack involved — this is why `await` is "nearly free," see "Key
     structural decisions"); the host later settles it with
     `js_resolve`/`js_reject` + `js_run_jobs`. Exercised end-to-end in
-    `test/test_async.c`, but only as natively-compiled C — not yet exercised
-    running as compiled WASM in Node/the browser (the npm package wrapper
-    only exposes `__hostcall`, below) — a coverage gap, not a missing
-    feature.
+    `test/test_async.c` as natively-compiled C, and now also as compiled
+    WASM in Node: `wasm_api.c` exposes a test-only `__nativeDefer(id)`
+    native + `jsvm_settle_deferred(id, value)` export (settled from a real
+    JS timer callback in `.github/scripts/smoke.mjs`, not through
+    Asyncify) — closing the coverage gap that used to exist here.
   - **`__hostcall(name, argsJson)`** (`src/wasm_api.c`): a *synchronous-
     looking* guest call — no guest-level `await` needed — that suspends the
     whole WASM call stack via Emscripten Asyncify while a (possibly async)

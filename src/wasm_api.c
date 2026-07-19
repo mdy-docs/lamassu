@@ -211,6 +211,53 @@ static bool native_hostcall(JsContext *ctx, JsValue this_val, const JsValue *arg
     free(reply);
     return ok; /* on false the engine throws *result */
 }
+
+/*
+ * __nativeDefer(id): the OTHER host-async mechanism (see js_promise.c) —
+ * returns a pending promise immediately (no Asyncify involved) that guest
+ * code `await`s; the fiber suspends at the interpreter level and jsvm_eval
+ * returns with the module still pending. The host settles it later, from a
+ * real JS callback (timer, fetch, …), via jsvm_settle_deferred(id, value)
+ * below. Exists to exercise this path as compiled WASM in Node, which
+ * __hostcall's Asyncify-based test does not cover.
+ */
+#define MAX_DEFERRED 32
+static JsValue g_deferred[MAX_DEFERRED];
+static bool g_deferred_live[MAX_DEFERRED];
+
+static bool native_native_defer(JsContext *ctx, JsValue this_val, const JsValue *args,
+                                int argc, JsValue *result) {
+    (void)this_val;
+    int id = argc > 0 && js_is_number(args[0]) ? (int)js_get_number(args[0]) : -1;
+    if (id < 0 || id >= MAX_DEFERRED || g_deferred_live[id]) {
+        *result = string_value_from_utf8("__nativeDefer: bad or reused id");
+        return false;
+    }
+    JsValue p = js_promise_new(ctx);
+    if (!js_is_promise(p)) {
+        *result = string_value_from_utf8("__nativeDefer: out of memory");
+        return false;
+    }
+    g_deferred[id] = p;
+    js_gc_protect(g_vm, &g_deferred[id]);
+    g_deferred_live[id] = true;
+    *result = p;
+    return true;
+}
+
+/* Settles a pending __nativeDefer(id) promise with a string value and drains
+ * the microtask queue, resuming any guest fiber awaiting it. Call
+ * jsvm_eval again afterward to observe the result (e.g. a persisted global
+ * the guest assigned the awaited value to). */
+EXPORT void jsvm_settle_deferred(int id, const char *value_utf8) {
+    if (!g_ctx || id < 0 || id >= MAX_DEFERRED || !g_deferred_live[id])
+        return;
+    JsValue v = string_value_from_utf8(value_utf8 ? value_utf8 : "");
+    js_resolve(g_ctx, g_deferred[id], v);
+    js_gc_unprotect(g_vm, &g_deferred[id]);
+    g_deferred_live[id] = false;
+    js_run_jobs(g_ctx);
+}
 #endif
 
 static void ensure_vm(void) {
@@ -224,6 +271,10 @@ static void ensure_vm(void) {
     static const uint16_t hostcall_name[] = {'_', '_', 'h', 'o', 's', 't',
                                              'c', 'a', 'l', 'l'};
     js_register_native(g_ctx, hostcall_name, 10, native_hostcall, NULL);
+    static const uint16_t defer_name[] = {'_', '_', 'n', 'a', 't', 'i', 'v',
+                                          'e', 'D', 'e', 'f', 'e', 'r'};
+    js_register_native(g_ctx, defer_name, 13, native_native_defer, NULL);
+    memset(g_deferred_live, 0, sizeof g_deferred_live);
 #endif
 }
 

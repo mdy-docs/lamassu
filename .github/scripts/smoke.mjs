@@ -40,6 +40,22 @@ check(
   await engine.eval("try { __hostcall('nope', '[]') } catch (e) { 'caught: ' + e }"),
   "⇒ caught: unknown native \"nope\"",
 );
+
+// Guest-level await of a native-returned promise (js_promise_new /
+// js_resolve — the OTHER async mechanism, distinct from __hostcall's
+// Asyncify suspension): __nativeDefer(id) returns a pending promise;
+// jsvm_settle_deferred settles it from a real JS timer callback, mirroring
+// how a browser/Node host would resolve a promise from its own event loop.
+{
+  const settleDeferred = engine.module.cwrap("jsvm_settle_deferred", null, ["number", "string"]);
+  await engine.eval("let OUT;");
+  // Module suspends on the await; __nativeDefer's promise never auto-settles,
+  // so this returns with the guest fiber still pending.
+  await engine.eval("OUT = await __nativeDefer(1);");
+  // Settle from a real event-loop callback, like a browser/Node host would.
+  await new Promise((r) => setTimeout(() => (settleDeferred(1, "43"), r()), 20));
+  check("guest await of native promise (__nativeDefer)", await engine.eval("OUT"), "⇒ 43");
+}
 check(
   "ReDoS step budget",
   await engine.eval("/(a+)+$/.test('a'.repeat(200) + 'b');"),
