@@ -1,25 +1,10 @@
-# jsvm — native test build + wasm32 freestanding build.
+# jsvm — native test build + WebAssembly package build.
 #
 # make test        build and run unit tests (plain + ASan/UBSan)
-# make wasm        build build/jsvm.wasm — needs a clang with a wasm backend
-#                  and wasm-ld. Auto-detected: system clang, the LLVM inside
-#                  an emsdk install (found via emcc on PATH), or Homebrew
-#                  LLVM. Override with WASM_CC=...
-#
-#                  Note: emcc itself can't drive this build — the core is
-#                  freestanding (-nostdlib) and emcc force-exports its
-#                  runtime's stack symbols, which don't exist here. The
-#                  clang/wasm-ld bundled with emsdk is what gets used.
+# make pkg         build the npm package's wasm artifact (needs emcc)
 # make clean
 
 CC ?= cc
-
-WASM_CC ?= $(shell \
-  if clang --print-targets 2>/dev/null | grep -q wasm32; then echo clang; \
-  elif command -v emcc >/dev/null 2>&1 && [ -x "$$(dirname "$$(command -v emcc)")/../bin/clang" ]; then \
-    echo "$$(dirname "$$(command -v emcc)")/../bin/clang"; \
-  elif [ -x /opt/homebrew/opt/llvm/bin/clang ]; then echo /opt/homebrew/opt/llvm/bin/clang; \
-  else echo clang; fi)
 
 WARNINGS = -std=c11 -Wall -Wextra -Werror -Wshadow -Wvla
 CFLAGS  ?= -O2 -g
@@ -36,10 +21,9 @@ INC := -Iinclude -Isrc
 ASAN := -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer
 
 # Regex engine (third_party/baru-re), enabled via -DJSVM_HAS_REGEX in every
-# hosted build. The freestanding wasm target stays regex-free: the engine
-# needs libc (malloc for class string sets and VM contexts). Compiled as
-# separate objects because re_vm.c contains three VLAs the engine's own build
-# permits — the engine keeps every other strict flag, jsvm code keeps -Wvla.
+# build. Compiled as separate objects because re_vm.c contains three VLAs the
+# engine's own build permits — the engine keeps every other strict flag,
+# jsvm code keeps -Wvla.
 RE_INC  := -Ithird_party/baru-re/include
 RE_WARN := -std=c11 -Wall -Wextra -Werror -Wshadow
 RE_SRC  := third_party/baru-re/src/re_lexer.c third_party/baru-re/src/re_parser.c \
@@ -173,26 +157,14 @@ test: build/test_runner build/test_runner_asan build/test_syntax build/test_synt
 	./build/test_module_bc
 	./build/test_module_bc_asan
 
-# Freestanding wasm32: no libc, no OS. The core never calls libc; the shim
-# provides the mem* symbols the compiler itself may emit. -fno-builtin keeps
-# the shim's own implementations from being folded into recursive calls.
-.PHONY: wasm
-wasm: build/jsvm.wasm
-build/jsvm.wasm: $(SRC) src/js_wasm_shim.c $(HDR)
-	@mkdir -p build
-	$(WASM_CC) --target=wasm32-unknown-unknown $(WARNINGS) -O2 \
-	  -ffreestanding -fno-builtin -nostdlib -DJSVM_FREESTANDING \
-	  $(INC) -Wl,--no-entry -Wl,--export-all -Wl,-z,stack-size=1048576 \
-	  $(SRC) src/js_wasm_shim.c -o $@
-
 # npm package artifact: the engine's REPL surface compiled to an ES module
 # (packages/lamassu-js/dist/lamassu.mjs + lamassu.wasm), the wasm+shim the npm
 # package publishes and the Vite playground imports. Needs emcc on PATH
-# (Emscripten SDK). Unlike `wasm`, this is NOT freestanding: emscripten supplies
-# libc (malloc/free). EXPORT_ES6 + the .mjs extension emit a real ES module
-# whose default export is the `createLamassuModule` factory; it locates the
-# sibling .wasm via import.meta.url (a bundler like Vite can also be handed an
-# explicit wasm URL — see the package wrapper).
+# (Emscripten SDK); emscripten supplies libc (malloc/free). EXPORT_ES6 + the
+# .mjs extension emit a real ES module whose default export is the
+# `createLamassuModule` factory; it locates the sibling .wasm via
+# import.meta.url (a bundler like Vite can also be handed an explicit wasm
+# URL — see the package wrapper).
 EMCC ?= emcc
 PKG_DIR := packages/lamassu-js
 PKG_DIST := $(PKG_DIR)/dist

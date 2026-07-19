@@ -1,8 +1,7 @@
 /*
  * RegExp binding layer over third_party/baru-re (ECMAScript-flavored
- * backtracking regex engine). Hosted builds only: the engine needs libc, so
- * everything here is compiled out of JSVM_FREESTANDING builds and the
- * compiler rejects regex literals there with a clear message.
+ * backtracking regex engine). Feature-flagged behind JSVM_HAS_REGEX; the
+ * compiler rejects regex literals with a clear message when it's off.
  *
  * A regexp is a JS_KIND_OBJECT cell with obj_kind == JS_OBJ_REGEXP whose
  * cell embeds the compiled Program. source/flags/lastIndex and the flag

@@ -105,7 +105,7 @@ static inline bool js_same_value(JsValue a, JsValue b) { return a.bits == b.bits
 typedef void *(*JsReallocFn)(void *ud, void *ptr, size_t old_size, size_t new_size);
 
 typedef struct JsVmConfig {
-    JsReallocFn realloc_fn; /* NULL: libc realloc (unavailable in freestanding builds) */
+    JsReallocFn realloc_fn; /* NULL: use libc realloc */
     void *alloc_ud;
     size_t gc_threshold;    /* live bytes before first auto-collect; 0 = default */
     size_t heap_limit;      /* hard cap on live bytes; 0 = unlimited */

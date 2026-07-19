@@ -1,9 +1,8 @@
 /*
  * Browser/Node embedding surface (built with emscripten, which supplies libc
- * malloc/realloc/free — so this is NOT a freestanding build). Keeps one
- * persistent VM+context so state carries across evals; a `print()` native
- * captures output into a growing buffer that jsvm_eval returns as a
- * NUL-terminated UTF-8 string.
+ * malloc/realloc/free). Keeps one persistent VM+context so state carries
+ * across evals; a `print()` native captures output into a growing buffer
+ * that jsvm_eval returns as a NUL-terminated UTF-8 string.
  *
  * Exposed to JS (see the Makefile `pkg` target):
  *   const char *jsvm_eval(const char *src_utf8);  // output + result/error

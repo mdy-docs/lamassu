@@ -1,7 +1,5 @@
 /*
- * Date binding layer. Always available (no libc dependency beyond an
- * optional wall-clock read, guarded out of freestanding builds — see
- * js_date.c). No time zone database: every value is treated as UTC, so
+ * Date binding layer. No time zone database: every value is treated as UTC, so
  * getFullYear()/getUTCFullYear() etc. are identical and
  * getTimezoneOffset() is always 0. Date parsing understands a subset of
  * ISO 8601 ("YYYY-MM-DD" / "YYYY-MM-DDTHH:mm:ss.sssZ"); other formats

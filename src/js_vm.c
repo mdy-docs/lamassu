@@ -3,7 +3,6 @@
 
 #define JS_GC_DEFAULT_THRESHOLD ((size_t)256 * 1024)
 
-#ifndef JSVM_FREESTANDING
 #include <stdlib.h>
 
 static void *js_default_realloc(void *ud, void *ptr, size_t old_size, size_t new_size) {
@@ -15,7 +14,6 @@ static void *js_default_realloc(void *ud, void *ptr, size_t old_size, size_t new
     }
     return realloc(ptr, new_size);
 }
-#endif
 
 void *js_realloc_raw(JsVm *vm, void *ptr, size_t old_size, size_t new_size) {
     if (new_size == 0) {
@@ -34,12 +32,8 @@ void *js_realloc_raw(JsVm *vm, void *ptr, size_t old_size, size_t new_size) {
 JsVm *js_vm_new(const JsVmConfig *cfg) {
     JsReallocFn fn = cfg ? cfg->realloc_fn : NULL;
     void *ud = cfg ? cfg->alloc_ud : NULL;
-#ifndef JSVM_FREESTANDING
     if (!fn)
         fn = js_default_realloc;
-#endif
-    if (!fn)
-        return NULL;
 
     JsVm *vm = fn(ud, NULL, 0, sizeof *vm);
     if (!vm)

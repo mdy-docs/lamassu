@@ -3,20 +3,7 @@
 
 #include "jsvm.h"
 
-/*
- * The core is freestanding: no libc calls anywhere. The mem* functions are
- * the one exception (compilers emit them for struct copies regardless), so
- * freestanding builds get prototypes here and definitions from
- * js_wasm_shim.c.
- */
-#ifdef JSVM_FREESTANDING
-void *memcpy(void *dst, const void *src, size_t n);
-void *memmove(void *dst, const void *src, size_t n);
-void *memset(void *dst, int c, size_t n);
-int   memcmp(const void *a, const void *b, size_t n);
-#else
 #include <string.h>
-#endif
 
 typedef enum JsGcKind {
     JS_KIND_STRING = 1,

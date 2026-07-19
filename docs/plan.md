@@ -10,12 +10,22 @@ language.
 - Compile source to bytecode once; execute compiled functions repeatedly with no
   re-parse/re-compile cost.
 - Support async/await for calling out to native (host) functions that may take
-  time. **Landed** for the npm package (`src/wasm_api.c` `__hostcall` +
-  Emscripten Asyncify + the shim's `natives` option): a guest calls
-  `__hostcall(name, argsJson)` synchronously, the whole VM execution suspends
-  while the host's (possibly async) native runs, and resumes with its result.
-  Guest-level `await` of natives-as-promises remains open for the freestanding
-  core.
+  time. Two complementary mechanisms:
+  - **Guest-level `await` of a native-returned promise** (`src/js_promise.c`):
+    a native creates a pending promise (`js_promise_new`) and returns it;
+    guest code `await`s it like any other promise, suspending the JS fiber
+    (no C stack involved — this is why `await` is "nearly free," see "Key
+    structural decisions"); the host later settles it with
+    `js_resolve`/`js_reject` + `js_run_jobs`. Exercised end-to-end in
+    `test/test_async.c`, but only as natively-compiled C — not yet exercised
+    running as compiled WASM in Node/the browser (the npm package wrapper
+    only exposes `__hostcall`, below) — a coverage gap, not a missing
+    feature.
+  - **`__hostcall(name, argsJson)`** (`src/wasm_api.c`): a *synchronous-
+    looking* guest call — no guest-level `await` needed — that suspends the
+    whole WASM call stack via Emscripten Asyncify while a (possibly async)
+    JS host function runs, then resumes with its result. Covered by the npm
+    package's CI smoke test running as real WASM in Node.
 - Support ECMAScript modules (`import` / `export`).
 - Be safe against hostile scripts: bounded CPU (fuel), bounded memory, bounded
   stack depth.
@@ -24,31 +34,11 @@ language.
 - A native command-line tool (`jsvm`) that compiles and runs a JavaScript
   file — both a developer convenience and the harness the script-level and
   differential test suites drive.
-- An **npm package** (`@mdy-docs/lamassu-js`, `packages/lamassu-js/`) — the
-  engine's REPL surface built to a WebAssembly **ES module** by Emscripten
-  (`make pkg` → `packages/lamassu-js/dist/lamassu.{mjs,wasm}`, `-sEXPORT_ES6`),
-  plus a small typed ESM wrapper (`index.js` + `index.d.ts`) exposing
-  `createLamassu() → { eval, reset }`. The published tarball is the `.wasm` +
-  the shim; the `.wasm` is a real asset (never base64-inlined), located via
-  `import.meta.url` in native ESM or an explicit `wasmUrl` under a bundler.
-  Published to npm by `.github/workflows/npm-publish.yml` (gated on a Node
-  smoke test that instantiates the artifact and evaluates).
-- A browser playground (`web/`) — a **Vite** app that imports the package and
-  drives an editor + REPL with runnable samples, deployed to GitHub Pages by
-  `.github/workflows/pages.yml` (build wasm → `npm ci` → `vite build` →
-  deploy `web/dist`). The REPL keeps a persistent VM so state carries across
-  runs; a `print()` native captures output. The repo is an npm-workspaces
-  monorepo (`packages/*` + `web`). The Emscripten build is non-freestanding
-  (it supplies libc); the freestanding `wasm` target remains the embeddable
-  core.
-- A **persistent lexical environment** for REPL sessions
-  (`js_compile_module_repl`): top-level `let`/`const`/`function` bindings
-  live in a per-context lexical scope (values + a const-marker set) that
-  survives across evaluations, with real `const` enforcement and correct
-  block/loop scoping (bindings inside blocks and loop heads stay local).
-  Free names fall back to globals so builtins still resolve. Used by the web
-  REPL, the CLI's interactive REPL (`jsvm` with no file), and any embedder.
-  New opcodes: `GET_LEXICAL`/`GET_LEXICAL_SOFT`/`SET_LEXICAL`/`DEFINE_LEXICAL`.
+- An npm package (`@mdy-docs/lamassu-js`, `packages/lamassu-js/`) exposing the
+  engine as a WebAssembly ES module (`createLamassu() → { eval, reset }`),
+  published to npm on CI.
+- A browser playground (`web/`, a Vite app) built on the npm package, with a
+  persistent-VM REPL, deployed to GitHub Pages on CI.
 
 ## Non-goals
 
@@ -110,41 +100,21 @@ semantics differ and silently diverging from real JS is the worst failure
 mode for a templating language. Differential testing against Node is
 unaffected — the shared subset simply never contains `var`.
 
-## Size & timeline estimate
-
-Total scope is roughly **20–30k lines of C** — a medium-sized engine.
-Calibration points: MuJS (ES5 interpreter, no async/modules) ≈ 15k lines;
-QuickJS (full ES2023) ≈ 85k lines.
-
-Working in AI-assisted sessions:
-
-- **Runnable core** (control flow, closures, objects, template literals,
-  try/catch): ~1 week of sessions.
-- **Feature-complete** (+ async/await, modules, destructuring, bytecode
-  serialization): ~2–3 weeks.
-- **Regex**: ✅ integrated (`third_party/baru-re` behind `JSVM_HAS_REGEX`),
-  including the engine-side step budget (catchable RangeError on
-  catastrophic backtracking).
-- **Hardening tail** (fuzzing, sanitizers, differential testing): a few weeks
-  of mostly background machine time.
-
-Hand-written solo without assistance this would be a 2–4 month full-time project.
-
 ## Architecture
 
 ### Layering
 
 ```
 ┌───────────────────────────────────────────┐
-│ per-host glue (thin, one per target)      │  wasm_api.c — flat ABI: uint32 handles,
-│ browser / wasmtime / node …               │  ptr+len strings, exported functions
-│ native CLI (tools/jsvm) — file I/O and    │
-│ UTF-8→UTF-16 conversion live here, not    │
+│ per-host glue (thin)                      │  wasm_api.c (Emscripten, browser/Node
+│                                            │  via the npm package) — flat ABI: ptr+len
+│ native CLI (tools/jsvm) — file I/O and    │  strings, exported functions.
+│ UTF-8→UTF-16 conversion live here, not    │  native CLI links the core directly.
 │ in the core                               │
 ├───────────────────────────────────────────┤
-│ libjsvm core — pure freestanding C11      │  no globals, no I/O, no OS calls;
-│ lexer → parser → compiler → interpreter   │  allocator + host callbacks injected
-│ GC, values, builtins, modules, promises   │  via JsVmConfig
+│ libjsvm core — portable C11               │  no static globals; allocator + host
+│ lexer → parser → compiler → interpreter   │  callbacks overridable via JsVmConfig
+│ GC, values, builtins, modules, promises   │  (defaults to libc realloc)
 └───────────────────────────────────────────┘
 ```
 
@@ -187,8 +157,8 @@ void       js_run_jobs(JsContext *ctx);
 2. **Host-neutral async contract.** A native function that needs time returns a
    pending promise; the fiber suspends. When the host finishes, it calls
    `js_resolve(ctx, promise, value)` then `js_run_jobs(ctx)`. A browser does
-   that from a JS promise callback, wasmtime from its own scheduler — the core
-   never knows the difference.
+   that from a JS promise callback, Node from a timer/event callback — the
+   core never knows the difference.
 3. **NaN-boxed values.** 64-bit `JsValue` with doubles stored directly and
    pointers/tags in the NaN payload; wasm32's 32-bit pointers fit comfortably.
 4. **Interned atoms for property keys**; immutable UTF-16 strings, always
@@ -304,7 +274,7 @@ past phase 7.
 
 | Phase | Contents | Sessions |
 |---|---|---|
-| 1 | Repo scaffolding; build (native + `clang --target=wasm32`); NaN-boxed `JsValue`; mark-sweep GC; interned strings/atoms; hash maps | 2–3 |
+| 1 | Repo scaffolding; native build; NaN-boxed `JsValue`; mark-sweep GC; interned strings/atoms; hash maps | 2–3 |
 | 2 | Lexer + parser → AST, incl. template literals, destructuring patterns, ASI | 3–4 |
 | 3 | Bytecode format, compiler, interpreter core: expressions, control flow, scoping; minimal `jsvm` CLI (compile + run a file, print result/errors) | 2–3 |
 | 4 | Functions, closures/upvalues, heap-frame fibers, try/catch/throw | 2 |
@@ -312,15 +282,19 @@ past phase 7.
 | 6 | ✅ Promises, microtask queue, async/await (fiber suspend/resume), Promise.all/race/allSettled, executor, top-level await, host promise API | 1–2 |
 | 7 | ✅ ES modules: compile→instantiate→link→evaluate, host resolver, cyclic/diamond imports, live bindings, star re-export, async modules + TLA | 1–2 |
 | 8 | ✅ Bytecode serializer + validating loader (`src/js_serialize.c`): versioned `.jsbc` format (magic/version/flags header, recursively-inlined function records, tagged constants); the loader treats input as untrusted and does structural + dataflow verification (bounded const/local/upvalue indices with kind checks, jump targets on instruction boundaries, guaranteed terminator, and an abstract stack-depth pass that proves no under/overflow and recomputes `max_stack` — the stored value is never trusted). The interpreter's array/object-builder and varargs/iterator opcodes were hardened to guard their operand types so any structurally-valid bytecode is safe to execute. **Modules are supported too**: a `.jsbc` carries a script/module kind byte; a module buffer records the body function tree plus link metadata (imports, star re-exports, dependency specifiers), while resolved deps and live exports are runtime state rebuilt on load. `js_bytecode_compile_module` compiles one module independently; `js_eval_module_bytecode` + a `JsBytecodeResolver` load/verify/link/evaluate a graph, deduplicating shared modules by specifier and reusing the phase-7 instantiate→link→evaluate pipeline unchanged — so live bindings, cycles, diamonds, and re-exports all work from bytecode. The loader validates the module opcodes the interpreter trusts (GET_IMPORT/IMPORT_NS import-index bounds) and re-wires every nested function's `->module`. CLI: `--emit-bytecode` auto-detects modules and `--run-bytecode` resolves sibling `<dep>.jsbc` files. Tests: `test/test_bytecode.c` (scripts) + `test/test_module_bc.c` (module graphs vs. source, kind confusion, and a module-record mutation sweep) under ASan/UBSan | 1 |
-| 9 | WASM export surface + example host glue; fuel/memory/stack limits | 1–2 |
-| 10 | ✅ Regex: integrated `third_party/baru-re` — binding layer (`src/js_regexp.c`: RegExp global + literals, exec/test/toString, lastIndex protocol, match/matchAll/search/replace/replaceAll/split, named groups, `/d` indices), live-pattern cap (64), `JSVM_HAS_REGEX` compile flag (all hosted builds; freestanding wasm stays regex-free), and the engine-side step budget (`vm_context_set_step_budget`, added to baru-re) so catastrophic backtracking throws a catchable RangeError (see "Regex is the ReDoS hole") | 1–2 |
-| opt | Shapes + inline caches for property access (see "Property storage") — only once benchmarks exist | 2–3 |
-| — | Fuzzing (parser + interpreter under ASan/UBSan), differential testing vs Node | background |
+| 9 | ✅ WASM export surface (`src/wasm_api.c`) + fuel/heap/frame limits (`JsVmConfig.fuel`/`heap_limit`, `JS_MAX_FRAMES` in `src/js_interp.c`) | 1–2 |
+| 10 | ✅ Regex: integrated `third_party/baru-re` — binding layer (`src/js_regexp.c`: RegExp global + literals, exec/test/toString, lastIndex protocol, match/matchAll/search/replace/replaceAll/split, named groups, `/d` indices), live-pattern cap (64), `JSVM_HAS_REGEX` compile flag (on in every build), and the engine-side step budget (`vm_context_set_step_budget`, added to baru-re) so catastrophic backtracking throws a catchable RangeError (see "Regex is the ReDoS hole") | 1–2 |
 
-## Known deviations from spec (as of phase 5)
+All phases through 10 are landed and tested. The only remaining item on the
+roadmap:
 
-Tracked so differential testing against Node has a baseline; most resolve in
-later phases.
+| Phase | Contents | Sessions |
+|---|---|---|
+| opt | **Shapes + inline caches for property access** (see "Property storage") — only once benchmarks exist. Today `JsObject.props` is a `JsMap` (`src/js_map.c`): an open-addressed hash table keyed by interned atom pointer with a cached per-string hash — tier 1 of the design. Shapes (hidden classes shared by objects with the same property-insertion history) plus per-call-site inline caches of `(shape, slot)` are tier 3, and also resolve the "object key order follows hash order" deviation below, since shapes store properties in insertion order. | 2–3 |
+
+## Known deviations from spec
+
+Tracked so differential testing against Node has a baseline.
 
 - **Object key order follows hash order, not insertion order.** Affects
   `Object.keys/values/entries`, `for` over object props, and
@@ -339,14 +313,15 @@ later phases.
 - **`Object.freeze` returns the object but does not enforce immutability.**
 - **`Array.from` supports strings and arrays**, not arbitrary array-likes or
   iterators.
-- **Regex (phase 10) landed**: `String.prototype.match/matchAll/search/replace/
-  replaceAll/split` accept `RegExp` patterns via `src/js_regexp.c`. Two
-  documented simplifications remain — `matchAll` returns an array rather than a
-  lazy iterator (`for-of` behaves identically), and `split` ignores its
-  `limit` argument (as the pre-existing string `split` already did).
-- **No `new`/constructors, no prototype chain** — builtin methods live on
-  hidden per-context tables, invisible to scripts. `Promise(executor)` is
-  callable without `new` (the subset's deliberate accommodation).
+- **Regex** (`src/js_regexp.c`): `String.prototype.match/matchAll/search/
+  replace/replaceAll/split` accept `RegExp` patterns. Two documented
+  simplifications remain — `matchAll` returns an array rather than a lazy
+  iterator (`for-of` behaves identically), and `split` ignores its `limit`
+  argument (as the pre-existing string `split` already did).
+- **`Promise(executor)` is callable without `new`** (the subset's deliberate
+  accommodation), alongside real `new`/constructor-function support and
+  prototype chains ([[Prototype]] set by `new`, walked by property lookup,
+  inspectable via `Object.get/setPrototypeOf`) for everything else.
 - **Unhandled promise rejections are silent** — tracked (`handled` flag) but
   not reported; a host hook can be added later.
 - **A top-level-await module awaiting a host promise** returns from

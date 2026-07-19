@@ -8,11 +8,7 @@
  *
  * Calendar math is Howard Hinnant's well-known constant-time
  * days_from_civil/civil_from_days (public domain), exact for the proleptic
- * Gregorian calendar in both directions, so no libc <time.h> is needed —
- * the file stays link-safe in the freestanding (-nostdlib) wasm build. The
- * one genuinely host-dependent bit, reading the wall clock for `new Date()`
- * / `Date.now()`, is isolated behind host_now_ms() and guarded out of that
- * build (see there for what happens instead).
+ * Gregorian calendar in both directions.
  */
 #include "js_bytecode.h"
 #include "js_date.h"
@@ -30,21 +26,14 @@ static bool is_finite_num(double d) {
     return d == d && d != __builtin_inf() && d != -__builtin_inf();
 }
 
-/* ---- wall clock (hosted builds only) ---- */
+/* ---- wall clock ---- */
 
-#ifndef JSVM_FREESTANDING
 #include <sys/time.h>
 static double host_now_ms(void) {
     struct timeval tv;
     gettimeofday(&tv, NULL);
     return (double)tv.tv_sec * 1000.0 + (double)tv.tv_usec / 1000.0;
 }
-#else
-/* No clock source in the freestanding build: `new Date()`/`Date.now()`
- * read the epoch there. Explicit-argument construction (numbers, ISO
- * strings, components) is unaffected. */
-static double host_now_ms(void) { return 0.0; }
-#endif
 
 /* ---- integer floor div/mod (well-defined for negative operands) ---- */
 
