@@ -1,6 +1,7 @@
 # jsvm — native test build + WebAssembly package build.
 #
 # make test        build and run unit tests (plain + ASan/UBSan)
+# make bench       build the CLI and run bench/*.js, reporting ops/sec
 # make pkg         build the npm package's wasm artifact (needs emcc)
 # make clean
 
@@ -156,6 +157,18 @@ test: build/test_runner build/test_runner_asan build/test_syntax build/test_synt
 	./build/test_bytecode_asan
 	./build/test_module_bc
 	./build/test_module_bc_asan
+
+# Benchmarks (bench/*.js): -O2 release build, no ASan overhead, so numbers
+# reflect real interpreter performance. Each script self-times with Date.now()
+# and prints one "name: N iters in Mms (ops/sec)" line; see bench/_util.js.
+# Gates the "opt" roadmap phase in docs/plan.md (shapes + inline caches for
+# property access) — that work is deferred until these numbers say it matters.
+.PHONY: bench
+bench: build/jsvm
+	@for f in bench/*.js; do \
+	  case "$$f" in */_util.js) continue ;; esac; \
+	  ./build/jsvm "$$f" || exit 1; \
+	done
 
 # npm package artifact: the engine's REPL surface compiled to an ES module
 # (packages/lamassu-js/dist/lamassu.mjs + lamassu.wasm), the wasm+shim the npm

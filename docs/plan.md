@@ -291,7 +291,7 @@ roadmap:
 
 | Phase | Contents | Sessions |
 |---|---|---|
-| opt | **Shapes + inline caches for property access** (see "Property storage") — only once benchmarks exist. Today `JsObject.props` is a `JsMap` (`src/js_map.c`): an open-addressed hash table keyed by interned atom pointer with a cached per-string hash — tier 1 of the design. Shapes (hidden classes shared by objects with the same property-insertion history) plus per-call-site inline caches of `(shape, slot)` are tier 3, and also resolve the "object key order follows hash order" deviation below, since shapes store properties in insertion order. | 2–3 |
+| opt | **Shapes + inline caches for property access** (see "Property storage") — only once benchmarks justify it. Today `JsObject.props` is a `JsMap` (`src/js_map.c`): an open-addressed hash table keyed by interned atom pointer with a cached per-string hash — tier 1 of the design. Shapes (hidden classes shared by objects with the same property-insertion history) plus per-call-site inline caches of `(shape, slot)` are tier 3, and also resolve the "object key order follows hash order" deviation below, since shapes store properties in insertion order. `make bench` (`bench/*.js`) runs the baseline: monomorphic vs. polymorphic property get/set, prototype-chain method calls, dense-array indexing, and a template-rendering composite closer to the actual target workload — re-run before/after to decide if this phase is worth its complexity. | 2–3 |
 
 ## Known deviations from spec
 
