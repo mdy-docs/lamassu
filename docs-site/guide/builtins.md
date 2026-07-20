@@ -5,21 +5,33 @@ aspirational list. If something below isn't listed, it isn't implemented;
 see [Deviations from real JS](/guide/deviations) for behavioral differences
 in the things that *are*.
 
-::: tip Callable vs. plain object
-`Array`, `String`, `Number`, `Boolean`, `Date`, `Map`, `Set`, `RegExp`, and
-`Promise` are all callable — `Ctor(...)` and `new Ctor(...)` both work (and,
-except for the primitive wrappers, behave identically either way; see the
-[C embedding API](/api/c-embedding) note on native constructors).
-**`Object` is currently a plain namespace object, not callable** —
-`Object()` / `new Object()` throw. Use object literals instead.
+::: tip Every constructor is callable
+`Object`, `Array`, `String`, `Number`, `Boolean`, `Date`, `Map`, `Set`,
+`RegExp`, and `Promise` are all callable — `Ctor(...)` and `new Ctor(...)`
+both work, and (except for the primitive wrappers) behave identically
+either way; see the [C embedding API](/api/c-embedding) note on native
+constructors.
 :::
 
 ## `Object`
 
-Static methods only: `keys`, `values`, `entries`, `assign`, `freeze`
-(returns the object but does not enforce immutability — see
+`Object()` / `new Object()`: no argument (or `undefined`/`null`) creates a
+new empty object; an object/array/function/promise argument is returned
+as-is (identity, matching spec). A **primitive** argument is also returned
+as-is — real JS would box it into a wrapper object, but this engine has no
+boxed-primitive type at all (see `String`/`Number` below), so there's
+nothing to box it into.
+
+**Statics**: `keys`, `values`, `entries`, `assign`, `freeze` (returns the
+object but does not enforce immutability — see
 [Deviations](/guide/deviations)), `fromEntries`, `hasOwn`,
 `getPrototypeOf`, `setPrototypeOf`.
+
+Plain objects have no `[[Prototype]]` at all in this engine (no
+`Object.prototype` to inherit from), unlike `Array`/`Date`/`Map`/`Set`/
+`RegExp` instances — so `{}.toString`, `{}.hasOwnProperty`, etc. are
+`undefined`, not inherited methods. Use the `Object.*` statics above
+instead.
 
 ## `Array`
 

@@ -293,6 +293,15 @@ static void test_object(void) {
     eq("let o = Object.freeze({a:1}); o.a;", "1");
     /* build object from entries after transform */
     eq("Object.fromEntries(Object.entries({a:1,b:2}).map(([k,v]) => [k, v*10])).a;", "10");
+    /* Object as a constructor: callable with or without `new` */
+    eq("typeof Object;", "function");
+    eq("Object.keys(Object()).length;", "0");
+    eq("Object.keys(new Object()).length;", "0");
+    eq("Object.keys(Object(null)).length;", "0");
+    eq("Object.keys(Object(undefined)).length;", "0");
+    eq("let a = [1,2]; Object(a) === a;", "true");
+    eq("let o = {x:1}; Object(o) === o;", "true");
+    eq("typeof Object.keys;", "function"); /* statics survive the callable rewrite */
 }
 
 /* No time zone support: every value is UTC (each getX()/getUTCX() pair and

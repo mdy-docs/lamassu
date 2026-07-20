@@ -1998,6 +1998,27 @@ static bool obj_setPrototypeOf(JsContext *ctx, JsValue tv, const JsValue *args, 
     return true;
 }
 
+/* Object(...): callable with or without `new` (see JS_OP_NEW's native-
+ * constructor dispatch), like Array below. No arg, or undefined/null, means
+ * "new empty object"; an object/function/promise argument is returned as-is
+ * (identity, matching spec). A primitive argument is also returned as-is —
+ * real JS would box it (`new String(x)`-style), but this engine has no
+ * boxed-primitive type at all (see String()/Number() in the built-ins
+ * reference), so there is nothing to box it into. */
+static bool g_Object(JsContext *ctx, JsValue tv, const JsValue *args, int argc, JsValue *r) {
+    (void)tv;
+    JsValue v = ARG(0);
+    if (argc == 0 || js_is_undefined(v) || js_is_null(v)) {
+        JsValue o = js_object_new(ctx->vm);
+        if (!js_is_object(o))
+            return oom(ctx, r);
+        *r = o;
+        return true;
+    }
+    *r = v;
+    return true;
+}
+
 static bool arr_isArray(JsContext *ctx, JsValue tv, const JsValue *args, int argc, JsValue *r) {
     (void)ctx;
     (void)tv;
@@ -2499,11 +2520,13 @@ bool js_builtins_init(JsContext *ctx) {
         !def_fn(ctx, json, "parse", json_parse))
         return false;
 
-    /* Object */
-    JsValue objv = js_object_new(vm);
-    if (!js_is_object(objv) || !js_object_set_ascii(ctx, ctx->globals, "Object", objv))
+    /* Object: a callable native (Object() / new Object() behave identically —
+     * see JS_OP_NEW's native-constructor dispatch), statics-only like
+     * Number/String/Boolean below (plain objects have no [[Prototype]] slot
+     * to hang a real Object.prototype off in this engine). */
+    JsObject *object = def_ctor(ctx, "Object", g_Object);
+    if (!object)
         return false;
-    JsObject *object = js_value_object(objv);
     if (!def_fn(ctx, object, "keys", obj_keys) || !def_fn(ctx, object, "values", obj_values) ||
         !def_fn(ctx, object, "entries", obj_entries) || !def_fn(ctx, object, "assign", obj_assign) ||
         !def_fn(ctx, object, "freeze", obj_freeze) || !def_fn(ctx, object, "fromEntries", obj_fromEntries) ||

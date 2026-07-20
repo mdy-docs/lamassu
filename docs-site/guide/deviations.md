@@ -6,11 +6,17 @@ that's known to differ, so you're not surprised by one in production.
 
 ## Objects
 
-- **`Object` is not callable.** `Object()` and `new Object()` throw
-  `TypeError: value is not a function` / `not a constructor`. Use an object
-  literal (`{}`) instead. (Every other built-in constructor — `Array`,
-  `String`, `Number`, `Boolean`, `Date`, `Map`, `Set`, `RegExp`, `Promise`
-  — is callable.)
+- **Plain objects have no `[[Prototype]]` at all** — there's no
+  `Object.prototype` for `{}` to inherit from, so `{}.toString`,
+  `{}.hasOwnProperty`, etc. are `undefined` rather than inherited methods.
+  Use the `Object.*` statics (`Object.keys`, `Object.hasOwn`, ...) instead.
+  `Array`/`Date`/`Map`/`Set`/`RegExp` instances are unaffected — those have
+  real, script-visible prototype chains to their own constructor's
+  `.prototype`.
+- **`Object(primitiveValue)` returns the primitive unchanged** rather than
+  boxing it into a wrapper object — this engine has no boxed-primitive type
+  at all. `Object()`/`Object(null)`/`Object(undefined)` (a new empty
+  object) and `Object(anObject)` (identity) both match spec.
 - **Key order follows hash order, not insertion order.** Affects
   `Object.keys`/`values`/`entries`, `for...of` over `Object.entries(...)`,
   and `JSON.stringify` of plain objects. (Planned to resolve once the
