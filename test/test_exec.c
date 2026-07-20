@@ -268,6 +268,11 @@ static void test_objects_arrays(void) {
     expect_result("[1, 2] + '';", "1,2");
     expect_result("[[1, 2], 3] + '';", "1,2,3");
     expect_result("let a = [1]; a.length = 0; a.length;", "0");
+    /* out-of-[0, UINT32_MAX] lengths must be rejected before the double ->
+     * uint32_t cast, not fed to it (that cast is UB out of range) */
+    expect_error("let a = [1]; a.length = -1;", RUN_RUNTIME_ERR, "RangeError");
+    expect_error("let a = [1]; a.length = 1e20;", RUN_RUNTIME_ERR, "RangeError");
+    expect_error("let a = [1]; a.length = 1.5;", RUN_RUNTIME_ERR, "RangeError");
     expect_result("let o = {}; o[1] = 'x'; o['1'];", "x");
     expect_result("let n = {a: {b: {c: 42}}}; n['a']['b'].c;", "42");
     expect_result("let shorthand = 7; let o = {shorthand}; o.shorthand;", "7");

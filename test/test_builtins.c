@@ -185,6 +185,19 @@ static void test_array(void) {
     eq("Array.from([1,2,3], x => x*x).join(',');", "1,4,9");
     /* map/filter chain */
     eq("[1,2,3,4,5].filter(x => x % 2).map(x => x * 10).join(',');", "10,30,50");
+    /* Array as a constructor: callable with or without `new`, same result */
+    eq("typeof Array;", "function");
+    eq("Array(3).length;", "3");
+    eq("new Array(3).length;", "3");
+    eq("Array(3)[0];", "undefined");
+    eq("Array(1,2,3).join(',');", "1,2,3");
+    eq("new Array(1,2,3).join(',');", "1,2,3");
+    eq("Array('x').join(',');", "x");
+    eq("Array().length;", "0");
+    eq("Object.getPrototypeOf(Array(1)) === Array.prototype;", "true");
+    err("Array(-1);", "RangeError");
+    err("Array(1.5);", "RangeError");
+    err("Array(4294967296);", "RangeError");
 }
 
 static void test_number(void) {

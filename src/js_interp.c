@@ -554,6 +554,12 @@ static JsPropStatus set_property(JsContext *ctx, JsValue base, JsValue key,
         } else if (js_is_string(key) &&
                    units_is_ascii_str(js_value_string(key), "length")) {
             double d = js_to_number_value(ctx, val);
+            /* bounds-check before the cast: (uint32_t)d is UB for d outside
+             * [0, UINT32_MAX], e.g. arr.length = -1 or arr.length = 1e20 */
+            if (!(d >= 0 && d < 4294967296.0)) {
+                *errmsg = "RangeError: invalid array length";
+                return JS_PROP_TYPE_ERROR;
+            }
             uint32_t n = (uint32_t)d;
             if ((double)n != d) {
                 *errmsg = "RangeError: invalid array length";
