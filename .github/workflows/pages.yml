@@ -1,8 +1,12 @@
-name: Deploy playground to GitHub Pages
+name: Deploy playground + docs to GitHub Pages
 
 # Builds the engine to WebAssembly (Emscripten), builds the Vite playground
-# against the workspace package, and publishes it to GitHub Pages. Enable Pages
-# in repo Settings → Pages with "Source: GitHub Actions" for this to deploy.
+# against the workspace package, builds the VitePress docs site, and
+# publishes both to GitHub Pages as one deploy: the playground at the site
+# root (https://mdy-docs.github.io/lamassu-js/, unchanged) and the docs
+# nested under /docs/ (docs-site/.vitepress/config.mts sets `base` to match).
+# Enable Pages in repo Settings → Pages with "Source: GitHub Actions" for
+# this to deploy.
 
 on:
   push:
@@ -52,8 +56,18 @@ jobs:
       - name: Build the Vite playground (web/dist)
         run: npm run build:web
 
+      - name: Build the VitePress docs site (docs-site/dist)
+        run: npm run build:docs
+
+      - name: Merge the docs build into the playground build (web/dist/docs)
+        run: |
+          mkdir -p web/dist/docs
+          cp -r docs-site/dist/. web/dist/docs/
+
       - name: Sanity-check the artifacts exist
-        run: test -f web/dist/index.html && ls web/dist/assets/*.wasm
+        run: |
+          test -f web/dist/index.html && ls web/dist/assets/*.wasm
+          test -f web/dist/docs/index.html
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

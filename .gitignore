@@ -5,10 +5,12 @@ node_modules/
 *.log
 .DS_Store
 
-# Emscripten + Vite build artifacts (rebuilt by CI / `make pkg` / `vite build`).
-# Source (web/index.html, web/src, the package wrapper) IS committed.
+# Emscripten + Vite + VitePress build artifacts (rebuilt by CI / `make pkg` /
+# `vite build` / `vitepress build`). Source IS committed.
 packages/lamassu-js/dist/
 web/dist/
+docs-site/dist/
+docs-site/.vitepress/cache/
 
 # legacy playground artifacts (now built by Vite)
 web/jsvm.js
