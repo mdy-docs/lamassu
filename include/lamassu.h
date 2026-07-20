@@ -1,5 +1,5 @@
 /*
- * jsvm — public embedding API, phase 1.
+ * lamassu-js — public embedding API, phase 1.
  *
  * Strings are UTF-16 code units carried as pointer + length, never
  * NUL-terminated. All state hangs off a JsVm; there are no globals.
@@ -11,8 +11,8 @@
  * protected object the value was stored into). Build with gc_stress to
  * shake out violations.
  */
-#ifndef JSVM_H
-#define JSVM_H
+#ifndef LAMASSU_H
+#define LAMASSU_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -348,4 +348,4 @@ size_t js_gc_live_cells(const JsVm *vm);
 }
 #endif
 
-#endif /* JSVM_H */
+#endif /* LAMASSU_H */

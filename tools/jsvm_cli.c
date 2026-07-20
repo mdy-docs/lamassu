@@ -10,7 +10,7 @@
 #include <string.h>
 
 #include "js_syntax.h" /* js_source_line_col */
-#include "jsvm.h"
+#include "lamassu.h"
 
 static uint8_t *read_file(const char *path, size_t *len_out) {
     FILE *f = fopen(path, "rb");

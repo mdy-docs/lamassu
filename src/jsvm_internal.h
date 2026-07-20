@@ -1,7 +1,7 @@
 #ifndef JSVM_INTERNAL_H
 #define JSVM_INTERNAL_H
 
-#include "jsvm.h"
+#include "lamassu.h"
 
 #include <string.h>
 

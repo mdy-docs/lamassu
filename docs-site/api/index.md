@@ -6,7 +6,7 @@ lamassu-js has two embedding surfaces:
   compiled to a WebAssembly ES module with a small JS wrapper. Use this from
   Node or the browser.
 - **[C embedding API](/api/c-embedding)** — the native `libjsvm` C library
-  (`include/jsvm.h`), for embedders working directly in C, or building their
+  (`include/lamassu.h`), for embedders working directly in C, or building their
   own bindings for another host environment.
 
 Both sit on top of the same core: a portable C11 interpreter with no static

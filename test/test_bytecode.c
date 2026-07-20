@@ -10,7 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "jsvm.h"
+#include "lamassu.h"
 
 static int checks_run;
 static int checks_failed;

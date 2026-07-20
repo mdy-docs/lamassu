@@ -22,7 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "jsvm.h"
+#include "lamassu.h"
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>

@@ -1,6 +1,6 @@
 # C embedding API
 
-The full public surface is `include/jsvm.h` — this page is a guided tour of
+The full public surface is `include/lamassu.h` — this page is a guided tour of
 it, not a replacement. Everything hangs off an explicit `JsVm` or
 `JsContext` handle (C's version of `this`); there is no static mutable
 state anywhere in the core, so multiple engines can coexist in one process.
@@ -330,7 +330,7 @@ script-visible `.prototype`.
 ## Minimal example
 
 ```c
-#include "jsvm.h"
+#include "lamassu.h"
 
 JsVm *vm = js_vm_new(NULL);
 JsContext *ctx = js_context_new(vm);
