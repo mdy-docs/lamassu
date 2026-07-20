@@ -1252,12 +1252,15 @@ JsModule *js_bc_load_module(JsContext *ctx, const uint8_t *buf, size_t len,
         }
     }
 
-    /* exports (namespace) object — populated when the body runs */
-    JsValue exports = js_object_new(vm);
+    /* exports (namespace) object — populated when the body runs. Real ESM's
+     * Module Namespace Exotic Object has [[Prototype]] === null, not
+     * Object.prototype (see js_module.c's module_get_or_compile). */
+    JsValue exports = js_object_new(ctx);
     if (!js_is_object(exports)) {
         *err = "out of memory";
         goto done;
     }
+    js_value_object(exports)->proto = js_undefined();
     ((JsModule *)js_value_cell(mv))->exports = js_value_object(exports);
     m = (JsModule *)js_value_cell(mv);
 

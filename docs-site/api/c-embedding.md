@@ -109,26 +109,22 @@ bool    js_string_equals(JsValue a, JsValue b);                     // content e
 ## Objects
 
 ```c
-JsValue js_object_new(JsVm *vm);                                          // undefined on OOM
+JsValue js_object_new(JsContext *ctx);                                    // undefined on OOM
 JsValue js_object_get(JsVm *vm, JsValue obj, JsValue key);                // undefined if absent
 bool    js_object_set(JsVm *vm, JsValue obj, JsValue key, JsValue value); // false on OOM/bad args
 bool    js_object_delete(JsVm *vm, JsValue obj, JsValue key);             // true if removed
 size_t  js_object_size(JsValue obj);
 ```
 
-`js_object_new` is context-free by design and deliberately has **no
-[[Prototype]]** — it predates contexts/realms, and a `JsVm` alone has no
-single "the" `Object.prototype` to give it (a `JsVm` can host multiple
-contexts, each with its own — see [Modules](#modules) for the same
-context-vs-vm distinction on a bigger scale). This is *not* what a guest
-`{}` literal produces: scripts get a real, script-visible
-`Object.prototype` (`hasOwnProperty`/`toString`/`valueOf`, and every other
-built-in prototype chains up to it too — see
-[Built-ins → Object](/guide/builtins#object)), reachable via
-`Object.getPrototypeOf`. There's currently no public function for a native
-to construct an object with that same prototype; if you need guest code to
-be unable to tell a host-constructed object from one it wrote itself,
-that's a gap worth raising.
+`js_object_new` takes the context, not just the VM, because
+`[[Prototype]]` is a realm concept: the new object's `[[Prototype]]` is
+`ctx->object_proto`, the same real, script-visible `Object.prototype`
+(`hasOwnProperty`/`toString`/`valueOf`, and every other built-in prototype
+chains up to it too — see [Built-ins → Object](/guide/builtins#object)) a
+guest `{}` literal gets, reachable via `Object.getPrototypeOf`. A native
+constructing an object this way is indistinguishable from guest code doing
+it. `get`/`set`/`delete`/`size` stay VM-scoped — they only ever touch own
+properties (no `[[Prototype]]` walk), so they need no realm context.
 
 ## Compiling & running
 

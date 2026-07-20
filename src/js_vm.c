@@ -96,15 +96,16 @@ static bool js_define_global(JsVm *vm, JsObject *globals, const char *name,
 }
 
 JsContext *js_context_new(JsVm *vm) {
-    JsValue globals = js_object_new(vm); /* safe point */
-    if (!js_is_object(globals))
-        return NULL;
-    /* Raw allocation cannot collect, so `globals` stays alive unrooted. */
+    /* Raw allocation cannot collect, so it's safe to build ctx here, before
+     * globals — js_object_new needs a JsContext (globals' [[Prototype]] is
+     * ctx->object_proto), and this is the only way to have one to give it.
+     * ctx isn't linked into vm->contexts (so not GC-visited) until after
+     * globals is created below, so its not-yet-initialized fields are never
+     * read by a collection that allocation might trigger. */
     JsContext *ctx = js_realloc_raw(vm, NULL, 0, sizeof *ctx);
     if (!ctx)
         return NULL;
     ctx->vm = vm;
-    ctx->globals = js_value_object(globals);
     ctx->string_methods = NULL;
     ctx->number_methods = NULL;
     ctx->promise_methods = NULL;
@@ -125,6 +126,16 @@ JsContext *js_context_new(JsVm *vm) {
     ctx->fiber = NULL;
     ctx->fuel = 0;
     ctx->error_pos = 0;
+
+    JsValue globals = js_object_new(ctx); /* safe point; ctx->object_proto is
+                                           * still NULL, so this correctly
+                                           * comes back prototype-less — see
+                                           * the globalThis wiring below */
+    if (!js_is_object(globals)) {
+        js_realloc_raw(vm, ctx, sizeof *ctx, 0);
+        return NULL;
+    }
+    ctx->globals = js_value_object(globals);
     ctx->next = vm->contexts;
     ctx->prev_link = &vm->contexts;
     if (vm->contexts)
@@ -143,10 +154,10 @@ JsContext *js_context_new(JsVm *vm) {
         js_context_free(ctx);
         return NULL;
     }
-    /* globalThis is ctx->globals itself, allocated above before ctx (and so
-     * before ctx->object_proto) existed — real JS has it inherit
-     * Object.prototype like any other ordinary object, so wire it up now
-     * that js_builtins_init has created one. */
+    /* globalThis is ctx->globals itself, created above before
+     * ctx->object_proto existed (js_builtins_init creates it) — real JS has
+     * it inherit Object.prototype like any other ordinary object, so wire
+     * it up now that one exists. */
     ctx->globals->proto = js_value_from_cell(&ctx->object_proto->gc);
     return ctx;
 }

@@ -140,15 +140,15 @@ bool    js_string_equals(JsValue a, JsValue b);                     /* content e
 /*
  * ---- objects (phase 1: string-keyed property bag) ----
  *
- * js_object_new is context-free and deliberately has no [[Prototype]] — it
- * predates contexts/realms. It is NOT what a guest `{}` literal produces:
- * scripts get a real, script-visible Object.prototype (hasOwnProperty,
- * toString, valueOf), reachable via Object.getPrototypeOf. A native that
- * wants to hand guest code an object indistinguishable from one it wrote
- * itself needs that prototype too; there is currently no public function
- * for it (only an internal one, scoped to the engine's own natives).
+ * js_object_new takes the context (not just the VM) because [[Prototype]]
+ * is a realm concept: the new object's [[Prototype]] is ctx->object_proto,
+ * the same real, script-visible Object.prototype (hasOwnProperty, toString,
+ * valueOf) a guest `{}` literal gets — a native constructing an object this
+ * way is indistinguishable from guest code doing it. get/set/delete/size
+ * stay VM-scoped: they only ever touch OWN properties (no [[Prototype]]
+ * walk), so they need no realm context.
  */
-JsValue js_object_new(JsVm *vm);                                    /* undefined on OOM */
+JsValue js_object_new(JsContext *ctx);                              /* undefined on OOM */
 JsValue js_object_get(JsVm *vm, JsValue obj, JsValue key);          /* undefined if absent */
 bool    js_object_set(JsVm *vm, JsValue obj, JsValue key, JsValue value); /* false on OOM/bad args */
 bool    js_object_delete(JsVm *vm, JsValue obj, JsValue key);       /* true if a property was removed */

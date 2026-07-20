@@ -230,16 +230,17 @@ prototype object a script can see is real and script-visible — `Ctor.prototype
 `Date.prototype`, `Map.prototype`, `Set.prototype`, `RegExp.prototype`,
 every user-defined constructor's `.prototype`, and `ctx->globals`
 (`globalThis`) itself. It has to be created first, before anything else in
-`js_builtins_init`, since object creation (`js_object_new_cell`, the
-internal, context-aware constructor everything above uses — not the public
-`js_object_new(JsVm*)`, which predates contexts and stays deliberately
-prototype-less) sets `[[Prototype]]` to whatever `ctx->object_proto`
-currently is. The one call this resolves to `undefined` (this engine's
-"no [[Prototype]]", surfaced as `null` via `Object.getPrototypeOf`) is
-`object_proto`'s own creation, when `ctx->object_proto` is still unset —
-the correct bootstrap, matching real JS's
-`Object.getPrototypeOf(Object.prototype) === null`, not a special case
-bolted on.
+`js_builtins_init`, since `js_object_new` — the *only* way to create a
+plain object anywhere in the engine, public API included; it takes a
+`JsContext*`, not a `JsVm*`, for exactly this reason — sets `[[Prototype]]`
+to whatever `ctx->object_proto` currently is. The one call this resolves to
+`undefined` (this engine's "no [[Prototype]]", surfaced as `null` via
+`Object.getPrototypeOf`) is `object_proto`'s own creation, when
+`ctx->object_proto` is still unset — the correct bootstrap, matching real
+JS's `Object.getPrototypeOf(Object.prototype) === null`, not a special case
+bolted on. (Two call sites want a genuinely null `[[Prototype]]` even after
+`object_proto` exists — module namespace objects, per spec — and undo the
+default explicitly right after construction; see `js_module.c`.)
 
 Strings/Numbers/Promises don't participate — they're primitives or a
 distinct GC kind with no `.proto` field to hang a chain off. Property

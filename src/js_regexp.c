@@ -459,10 +459,9 @@ static int named_group_index(const JsRegExp *re, const uint16_t *name, uint32_t 
 static bool named_groups_obj(JsContext *ctx, JsRegExp *re, const JsString *s,
                              const int32_t *caps, bool indices, JsValue *out) {
     JsVm *vm = ctx->vm;
-    JsObject *obj_cell = js_object_new_cell(ctx);
-    if (!obj_cell)
+    JsValue obj = js_object_new(ctx);
+    if (!js_is_object(obj))
         return false;
-    JsValue obj = js_value_from_cell(&obj_cell->gc);
     js_gc_protect(vm, &obj);
     JsValue kv = js_undefined(), vv = js_undefined();
     js_gc_protect(vm, &kv);
@@ -1186,9 +1185,10 @@ bool js_regexp_builtins_init(JsContext *ctx) {
     /* RegExp.prototype: a real object, set before any regexp (literal or
      * constructed) exists — js_regexp_new reads ctx->regexp_proto — and
      * also assigned as the constructor's `.prototype` below. */
-    ctx->regexp_proto = js_object_new_cell(ctx); /* rooted via the context now */
-    if (!ctx->regexp_proto)
+    JsValue t = js_object_new(ctx);
+    if (!js_is_object(t))
         return false;
+    ctx->regexp_proto = js_value_object(t); /* rooted via the context now */
     if (!def_method(ctx, ctx->regexp_proto, "exec", rexp_exec) ||
         !def_method(ctx, ctx->regexp_proto, "test", rexp_test) ||
         !def_method(ctx, ctx->regexp_proto, "toString", rexp_toString))

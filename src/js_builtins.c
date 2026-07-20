@@ -1641,12 +1641,12 @@ static bool json_value(JsonP *p, JsValue *out) {
     uint16_t c = p->u[p->pos];
     if (c == '{') {
         p->pos++;
-        JsObject *o = js_object_new_cell(p->ctx);
-        if (!o) {
+        JsValue ov = js_object_new(p->ctx);
+        if (!js_is_object(ov)) {
             p->error = true;
             return false;
         }
-        JsValue ov = js_value_from_cell(&o->gc);
+        JsObject *o = js_value_object(ov);
         js_gc_protect(p->ctx->vm, &ov);
         json_ws(p);
         bool okc = true;
@@ -1909,10 +1909,10 @@ static bool obj_fromEntries(JsContext *ctx, JsValue tv, const JsValue *args, int
     JsValue src = ARG(0);
     if (!js_is_object(src) || js_value_object(src)->obj_kind != JS_OBJ_ARRAY)
         return native_throw(ctx, r, "TypeError: Object.fromEntries expects an array of pairs");
-    JsObject *out = js_object_new_cell(ctx);
-    if (!out)
+    JsValue outv = js_object_new(ctx);
+    if (!js_is_object(outv))
         return oom(ctx, r);
-    JsValue outv = js_value_from_cell(&out->gc);
+    JsObject *out = js_value_object(outv);
     js_gc_protect(ctx->vm, &outv);
     JsObject *arr = js_value_object(src);
     bool ok = true;
@@ -2056,10 +2056,10 @@ static bool g_Object(JsContext *ctx, JsValue tv, const JsValue *args, int argc, 
     (void)tv;
     JsValue v = ARG(0);
     if (argc == 0 || js_is_undefined(v) || js_is_null(v)) {
-        JsObject *o = js_object_new_cell(ctx);
-        if (!o)
+        JsValue o = js_object_new(ctx);
+        if (!js_is_object(o))
             return oom(ctx, r);
-        *r = js_value_from_cell(&o->gc);
+        *r = o;
         return true;
     }
     *r = v;
@@ -2459,8 +2459,7 @@ static JsObject *def_ctor(JsContext *ctx, const char *name, JsNativeFn fn) {
     if (!js_is_function(nf))
         return NULL;
     js_gc_protect(ctx->vm, &nf); /* keep rooted through statics + global set */
-    JsObject *statics_o = js_object_new_cell(ctx);
-    JsValue statics = statics_o ? js_value_from_cell(&statics_o->gc) : js_undefined();
+    JsValue statics = js_object_new(ctx);
     if (!js_is_object(statics)) {
         js_gc_unprotect(ctx->vm, &nf);
         return NULL;
@@ -2476,14 +2475,15 @@ bool js_builtins_init(JsContext *ctx) {
     JsVm *vm = ctx->vm;
 
     /* Object.prototype: the root of every [[Prototype]] chain in the engine
-     * (js_object_new_cell(ctx) chains everything created after this point to
-     * it automatically — see jsvm_internal.h). Must be first: array_proto
-     * etc. below are themselves created via js_object_new_cell, and this is
-     * the one call where ctx->object_proto is still NULL (the correct,
-     * spec-matching bootstrap — see js_object_new_cell's comment). */
-    ctx->object_proto = js_object_new_cell(ctx);
-    if (!ctx->object_proto)
+     * (js_object_new(ctx) chains everything created after this point to it
+     * automatically — see js_object_new's bootstrap comment in js_object.c).
+     * Must be first: array_proto etc. below are themselves created via
+     * js_object_new, and this is the one call where ctx->object_proto is
+     * still NULL (the correct, spec-matching bootstrap). */
+    JsValue op = js_object_new(ctx);
+    if (!js_is_object(op))
         return false;
+    ctx->object_proto = js_value_object(op);
     static const MethodDef object_proto_methods[] = {
         {"hasOwnProperty", objp_hasOwnProperty},
         {"toString", objp_toString},
@@ -2494,7 +2494,7 @@ bool js_builtins_init(JsContext *ctx) {
 
     /* method tables — assign each into ctx before the next allocation so it
      * is a GC root immediately (gc_stress collects at every allocation) */
-    JsValue sm = js_object_new(vm);
+    JsValue sm = js_object_new(ctx);
     if (!js_is_object(sm))
         return false;
     ctx->string_methods = js_value_object(sm);
@@ -2503,11 +2503,12 @@ bool js_builtins_init(JsContext *ctx) {
      * js_array_new_cell doesn't need a property lookup on every array it
      * creates — property access on array instances never consults it
      * directly, it goes through the normal [[Prototype]] walk. Chains to
-     * Object.prototype automatically (js_object_new_cell, above). */
-    ctx->array_proto = js_object_new_cell(ctx);
-    if (!ctx->array_proto)
+     * Object.prototype automatically (js_object_new, above). */
+    JsValue am = js_object_new(ctx);
+    if (!js_is_object(am))
         return false;
-    JsValue num = js_object_new(vm);
+    ctx->array_proto = js_value_object(am);
+    JsValue num = js_object_new(ctx);
     if (!js_is_object(num))
         return false;
     ctx->number_methods = js_value_object(num);
@@ -2547,11 +2548,10 @@ bool js_builtins_init(JsContext *ctx) {
         return false;
 
     /* Math */
-    JsObject *math = js_object_new_cell(ctx);
-    if (!math)
+    JsValue mathv = js_object_new(ctx);
+    if (!js_is_object(mathv) || !js_object_set_ascii(ctx, ctx->globals, "Math", mathv))
         return false;
-    if (!js_object_set_ascii(ctx, ctx->globals, "Math", js_value_from_cell(&math->gc)))
-        return false;
+    JsObject *math = js_value_object(mathv);
     if (!def_fn(ctx, math, "abs", math_abs) || !def_fn(ctx, math, "floor", math_floor) ||
         !def_fn(ctx, math, "ceil", math_ceil) || !def_fn(ctx, math, "round", math_round) ||
         !def_fn(ctx, math, "trunc", math_trunc) || !def_fn(ctx, math, "sign", math_sign) ||
@@ -2576,9 +2576,10 @@ bool js_builtins_init(JsContext *ctx) {
         return false;
 
     /* JSON */
-    JsObject *json = js_object_new_cell(ctx);
-    if (!json || !js_object_set_ascii(ctx, ctx->globals, "JSON", js_value_from_cell(&json->gc)))
+    JsValue jsonv = js_object_new(ctx);
+    if (!js_is_object(jsonv) || !js_object_set_ascii(ctx, ctx->globals, "JSON", jsonv))
         return false;
+    JsObject *json = js_value_object(jsonv);
     if (!def_fn(ctx, json, "stringify", json_stringify) ||
         !def_fn(ctx, json, "parse", json_parse))
         return false;
@@ -2592,8 +2593,9 @@ bool js_builtins_init(JsContext *ctx) {
         return false;
     js_gc_protect(vm, &objv); /* keep rooted through statics + global set */
     ((JsNative *)js_value_cell(objv))->prototype = ctx->object_proto;
-    JsObject *object = js_object_new_cell(ctx);
-    bool obj_ok = object != NULL;
+    JsValue objectv = js_object_new(ctx);
+    bool obj_ok = js_is_object(objectv);
+    JsObject *object = obj_ok ? js_value_object(objectv) : NULL;
     if (obj_ok) {
         ((JsNative *)js_value_cell(objv))->statics = object;
         obj_ok = js_object_set_ascii(ctx, ctx->object_proto, "constructor", objv) &&
@@ -2618,8 +2620,9 @@ bool js_builtins_init(JsContext *ctx) {
         return false;
     js_gc_protect(vm, &arrv); /* keep rooted through statics + global set */
     ((JsNative *)js_value_cell(arrv))->prototype = ctx->array_proto;
-    JsObject *array = js_object_new_cell(ctx);
-    bool arr_ok = array != NULL;
+    JsValue arrayv = js_object_new(ctx);
+    bool arr_ok = js_is_object(arrayv);
+    JsObject *array = arr_ok ? js_value_object(arrayv) : NULL;
     if (arr_ok) {
         ((JsNative *)js_value_cell(arrv))->statics = array;
         arr_ok = def_fn(ctx, array, "isArray", arr_isArray) && def_fn(ctx, array, "of", arr_of) &&

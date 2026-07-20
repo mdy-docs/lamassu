@@ -354,9 +354,10 @@ bool js_mapobj_builtins_init(JsContext *ctx) {
      * constructor's `.prototype` below so `Map.prototype` and every
      * instance's [[Prototype]] are the exact same object — reachable,
      * mutable, no hidden table. */
-    ctx->map_proto = js_object_new_cell(ctx); /* rooted via the context now */
-    if (!ctx->map_proto)
+    JsValue t = js_object_new(ctx);
+    if (!js_is_object(t))
         return false;
+    ctx->map_proto = js_value_object(t); /* rooted via the context now */
 
     static const struct {
         const char *name;

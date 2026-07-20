@@ -143,14 +143,18 @@ static JsModule *module_get_or_compile(JsContext *ctx, JsString *specifier,
     JsValue mv = js_value_from_cell(cell);
     js_gc_protect(vm, &mv);
 
-    /* exports (namespace) object */
-    JsValue exports = js_object_new(vm);
+    /* exports (namespace) object. Real ESM's Module Namespace Exotic Object
+     * has [[Prototype]] === null (not Object.prototype like an ordinary
+     * object) — js_object_new(ctx) gives every new object Object.prototype
+     * by default, so undo that here to match spec exactly. */
+    JsValue exports = js_object_new(ctx);
     if (!js_is_object(exports)) {
         js_gc_unprotect(vm, &mv);
         js_gc_unprotect(vm, &specv);
         err->oom = true;
         return NULL;
     }
+    js_value_object(exports)->proto = js_undefined();
     ((JsModule *)js_value_cell(mv))->exports = js_value_object(exports);
 
     /* parse + compile the body */

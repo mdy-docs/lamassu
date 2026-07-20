@@ -1,22 +1,9 @@
 #include "jsvm_internal.h"
 
-JsValue js_object_new(JsVm *vm) {
-    JsGcCell *c = js_gc_new_cell(vm, JS_KIND_OBJECT, sizeof(JsObject));
-    if (!c)
-        return js_undefined();
-    JsObject *o = (JsObject *)c;
-    o->obj_kind = JS_OBJ_PLAIN;
-    js_map_init(&o->props);
-    o->elems = NULL;
-    o->elem_count = o->elem_cap = 0;
-    o->proto = js_undefined();
-    return js_value_from_cell(c);
-}
-
-JsObject *js_object_new_cell(JsContext *ctx) {
+JsValue js_object_new(JsContext *ctx) {
     JsGcCell *c = js_gc_new_cell(ctx->vm, JS_KIND_OBJECT, sizeof(JsObject));
     if (!c)
-        return NULL;
+        return js_undefined();
     JsObject *o = (JsObject *)c;
     o->obj_kind = JS_OBJ_PLAIN;
     js_map_init(&o->props);
@@ -28,7 +15,7 @@ JsObject *js_object_new_cell(JsContext *ctx) {
      * `Object.getPrototypeOf(Object.prototype) === null`. Every other call,
      * made after that assignment, chains to it normally. */
     o->proto = ctx->object_proto ? js_value_from_cell(&ctx->object_proto->gc) : js_undefined();
-    return o;
+    return js_value_from_cell(c);
 }
 
 JsObject *js_array_new_cell(JsContext *ctx, uint32_t reserve) {

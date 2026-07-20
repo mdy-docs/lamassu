@@ -147,8 +147,10 @@ static void test_strings(void) {
 static void test_objects(void) {
     CountAlloc ca;
     JsVm *vm = new_vm(&ca, false);
+    JsContext *ctx = js_context_new(vm); /* js_object_new needs a context now */
+    CHECK(ctx != NULL);
 
-    JsValue o = js_object_new(vm);
+    JsValue o = js_object_new(ctx);
     CHECK(js_is_object(o));
     CHECK(js_object_size(o) == 0);
 
@@ -240,10 +242,17 @@ static void test_gc_basic(void) {
 static void test_gc_object_graph(void) {
     CountAlloc ca;
     JsVm *vm = new_vm(&ca, false);
+    JsContext *ctx = js_context_new(vm); /* js_object_new needs a context now */
+    CHECK(ctx != NULL);
+    /* Context creation installs the whole stdlib, so the live-cell count is
+     * a large fixed baseline; assert relative deltas instead (see
+     * test_context, which established this pattern). */
+    js_gc_collect(vm);
+    size_t base = js_gc_live_cells(vm);
 
-    JsValue a = js_object_new(vm);
+    JsValue a = js_object_new(ctx);
     js_gc_protect(vm, &a);
-    JsValue b = js_object_new(vm);
+    JsValue b = js_object_new(ctx);
     js_gc_protect(vm, &b);
     JsValue k = js_atom(vm, U("child"), 5);
     js_gc_protect(vm, &k);
@@ -258,7 +267,7 @@ static void test_gc_object_graph(void) {
 
     /* Everything reachable from a: a, b, atom "child", string "payload". */
     js_gc_collect(vm);
-    CHECK(js_gc_live_cells(vm) == 4);
+    CHECK(js_gc_live_cells(vm) == base + 4);
     JsValue got = js_object_get(vm, js_object_get(vm, a, js_atom(vm, U("child"), 5)),
                                 js_atom(vm, U("child"), 5));
     CHECK(js_string_equals(got, js_string_new(vm, U("payload"), 7)));
@@ -266,11 +275,11 @@ static void test_gc_object_graph(void) {
     /* Sever b: only a and the key atom (still a's key) stay. */
     CHECK(js_object_set(vm, a, js_atom(vm, U("child"), 5), js_undefined()));
     js_gc_collect(vm);
-    CHECK(js_gc_live_cells(vm) == 2);
+    CHECK(js_gc_live_cells(vm) == base + 2);
 
     js_gc_unprotect(vm, &a);
     js_gc_collect(vm);
-    CHECK(js_gc_live_cells(vm) == 0);
+    CHECK(js_gc_live_cells(vm) == base);
 
     js_vm_free(vm);
     check_no_leaks(&ca);
@@ -279,10 +288,14 @@ static void test_gc_object_graph(void) {
 static void test_gc_cycle(void) {
     CountAlloc ca;
     JsVm *vm = new_vm(&ca, false);
+    JsContext *ctx = js_context_new(vm); /* js_object_new needs a context now */
+    CHECK(ctx != NULL);
+    js_gc_collect(vm);
+    size_t base = js_gc_live_cells(vm); /* stdlib baseline — see test_context */
 
-    JsValue a = js_object_new(vm);
+    JsValue a = js_object_new(ctx);
     js_gc_protect(vm, &a);
-    JsValue b = js_object_new(vm);
+    JsValue b = js_object_new(ctx);
     js_gc_protect(vm, &b);
     JsValue k = js_atom(vm, U("next"), 4);
     js_gc_protect(vm, &k);
@@ -294,7 +307,7 @@ static void test_gc_cycle(void) {
     js_gc_unprotect(vm, &b);
     js_gc_unprotect(vm, &k);
     js_gc_collect(vm);
-    CHECK(js_gc_live_cells(vm) == 0); /* mark-sweep eats cycles */
+    CHECK(js_gc_live_cells(vm) == base); /* mark-sweep eats cycles */
 
     js_vm_free(vm);
     check_no_leaks(&ca);
@@ -313,8 +326,12 @@ static void test_atoms_weak(void) {
     CHECK(js_is_string(again));
     CHECK(js_gc_live_cells(vm) == 1);
 
-    /* An atom in use as a property key survives and stays canonical. */
-    JsValue o = js_object_new(vm);
+    /* An atom in use as a property key survives and stays canonical.
+     * js_object_new needs a context now — created here, after the exact
+     * pre-stdlib live-cell checks above, so it doesn't disturb them. */
+    JsContext *ctx = js_context_new(vm);
+    CHECK(ctx != NULL);
+    JsValue o = js_object_new(ctx);
     js_gc_protect(vm, &o);
     JsValue kept = js_atom(vm, U("kept"), 4);
     js_gc_protect(vm, &kept);
@@ -373,8 +390,12 @@ static void test_context(void) {
 static void test_gc_stress(void) {
     CountAlloc ca;
     JsVm *vm = new_vm(&ca, true);
+    JsContext *ctx = js_context_new(vm); /* js_object_new needs a context now */
+    CHECK(ctx != NULL);
+    js_gc_collect(vm);
+    size_t base = js_gc_live_cells(vm); /* stdlib baseline — see test_context */
 
-    JsValue o = js_object_new(vm);
+    JsValue o = js_object_new(ctx);
     CHECK(js_is_object(o));
     js_gc_protect(vm, &o);
 
@@ -405,11 +426,11 @@ static void test_gc_stress(void) {
         js_gc_unprotect(vm, &k);
     }
     js_gc_collect(vm); /* flush the last iteration's garbage `want` string */
-    CHECK(js_gc_live_cells(vm) == 401); /* o + 200 keys + 200 values */
+    CHECK(js_gc_live_cells(vm) == base + 401); /* o + 200 keys + 200 values */
 
     js_gc_unprotect(vm, &o);
     js_gc_collect(vm);
-    CHECK(js_gc_live_cells(vm) == 0);
+    CHECK(js_gc_live_cells(vm) == base);
 
     js_vm_free(vm);
     check_no_leaks(&ca);
