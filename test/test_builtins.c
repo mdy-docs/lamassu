@@ -136,6 +136,14 @@ static void test_string(void) {
     eq("'a1b2'.replaceAll('1', '$&$&');", "a11b2");
     eq("'foo'.concat('bar', 'baz');", "foobarbaz");
     eq("String.fromCharCode(72, 105);", "Hi");
+    eq("String.fromCharCode(65 + 65536);", "A"); /* ToUint16 wraps mod 2**16 */
+    eq("String.fromCodePoint(72, 105);", "Hi");
+    eq("String.fromCodePoint(0x1F600).length;", "2"); /* astral: a surrogate pair */
+    err("String.fromCodePoint(-1);", "RangeError");
+    err("String.fromCodePoint(0x110000);", "RangeError"); /* > max code point */
+    err("String.fromCodePoint(1.5);", "RangeError"); /* non-integer */
+    err("String.fromCodePoint(1e20);", "RangeError"); /* was UB: out-of-range cast */
+    err("'x'.repeat(1e20);", "RangeError"); /* was UB: out-of-range cast */
     eq("String(42);", "42");
     eq("String(true);", "true");
     /* `new String(...)`: no boxed-primitive type here, so `new` on a native
@@ -290,6 +298,11 @@ static void test_object(void) {
     eq("Object.fromEntries([['a',1],['b',2]]).b;", "2");
     eq("Object.hasOwn({x:1}, 'x');", "true");
     eq("Object.hasOwn({x:1}, 'y');", "false");
+    /* was UB (out-of-range double->uint32_t cast) and returned true */
+    eq("Object.hasOwn([1,2,3], '1e20');", "false");
+    eq("[1,2,3].hasOwnProperty('1e20');", "false");
+    eq("[1,2,3].hasOwnProperty(1);", "true");
+    eq("[1,2,3].hasOwnProperty(5);", "false");
     eq("let o = Object.freeze({a:1}); o.a;", "1");
     /* build object from entries after transform */
     eq("Object.fromEntries(Object.entries({a:1,b:2}).map(([k,v]) => [k, v*10])).a;", "10");

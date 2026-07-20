@@ -278,8 +278,13 @@ static bool value_to_index(JsValue v, uint32_t *idx) {
     if (!js_is_number(v))
         return false;
     double d = js_get_number(v);
+    /* bounds-check before the cast: (uint32_t)d is UB for d outside
+     * [0, UINT32_MAX], e.g. arr[1e20] or arr[-1]. 0xFFFFFFFF is excluded by
+     * the strict '<' (not a valid array index, matching real JS). */
+    if (!(d >= 0 && d < 4294967295.0))
+        return false;
     uint32_t u = (uint32_t)d;
-    if ((double)u != d || u == 0xFFFFFFFF)
+    if ((double)u != d)
         return false;
     *idx = u;
     return true;
@@ -1458,7 +1463,14 @@ run:; /* (re)load the top frame */
                 break;
             }
             case JS_OP_ARRAY_REST: {
-                uint32_t from = (uint32_t)js_get_number(PEEK(0));
+                /* PEEK(0) is the "skip this many" count the compiler always
+                 * pushes as a small non-negative integer; validated-yet-
+                 * hostile bytecode could put something else here, so guard
+                 * the cast (see ARRAY_APPEND above for the same idea
+                 * applied to a type instead of a number). */
+                uint32_t from;
+                if (!value_to_index(PEEK(0), &from))
+                    RT_THROW("internal error: bad rest-count operand");
                 JsValue src = PEEK(1);
                 JsObject *out = js_array_new_cell(ctx, 0);
                 if (!out)
@@ -1599,7 +1611,12 @@ run:; /* (re)load the top frame */
             case JS_OP_ITER_NEXT: {
                 uint32_t done_target = READ_U32();
                 JsValue it = PEEK(1);
-                uint32_t i = (uint32_t)js_get_number(PEEK(0));
+                /* PEEK(0) is the iterator index the compiler always keeps a
+                 * small non-negative integer; guard the cast against
+                 * hostile bytecode the same way as ARRAY_REST above. */
+                uint32_t i;
+                if (!value_to_index(PEEK(0), &i))
+                    RT_THROW("internal error: bad iterator index operand");
                 if (js_is_string(it)) {
                     JsString *s = js_value_string(it);
                     if (i >= s->length) {
@@ -1819,7 +1836,16 @@ run:; /* (re)load the top frame */
                 break;
             }
             case JS_OP_RET_SUB: {
-                uint32_t ret = (uint32_t)js_get_number(POPV());
+                /* The popped value is the return address a matching GOSUB
+                 * pushed. The loader's structural verifier proves stack
+                 * *shape* around GOSUB/RET_SUB's subroutine polymorphism,
+                 * not that this runtime value is actually a legitimate
+                 * previously-pushed ip — so both the cast and the jump
+                 * target need guarding, unlike GOSUB's own target (a static
+                 * bytecode field, already validated at load time). */
+                uint32_t ret;
+                if (!value_to_index(POPV(), &ret) || ret >= fn->code_len)
+                    RT_THROW("internal error: bad subroutine return address");
                 ip = ret;
                 break;
             }

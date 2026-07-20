@@ -50,6 +50,19 @@ static uint32_t clamp_index(double d, uint32_t len) {
     return (uint32_t)d;
 }
 
+/* ECMAScript ToUint16: truncate, then reduce modulo 2^16 — never a plain
+ * (uint16_t)(uint32_t)d cast, which is UB for d outside [0, UINT32_MAX]
+ * (e.g. String.fromCharCode(1e20)). NaN/+-Infinity go to 0 first. */
+static uint16_t to_uint16(double d) {
+    d = to_int(d);
+    if (d == __builtin_inf() || d == -__builtin_inf())
+        return 0;
+    double m = __builtin_fmod(d, 65536.0);
+    if (m < 0)
+        m += 65536.0;
+    return (uint16_t)m; /* m is now in [0, 65536) — safe */
+}
+
 /* ---- string builder (C-side scratch, no GC cells until finish) ---- */
 
 typedef struct {
@@ -411,6 +424,11 @@ static bool sm_repeat(JsContext *ctx, JsValue tv, const JsValue *args, int argc,
     double d = to_int(js_to_number_value(ctx, ARG(0)));
     if (d < 0 || d == __builtin_inf())
         return native_throw(ctx, r, "RangeError: invalid count value");
+    /* bounds-check before the cast: (uint32_t)d is UB above UINT32_MAX,
+     * e.g. 'x'.repeat(1e20) — any count this large already fails the size
+     * check below anyway, so throw the same error a step earlier. */
+    if (d > 4294967295.0)
+        return native_throw(ctx, r, "RangeError: repeat count too large");
     uint32_t n = (uint32_t)d;
     if ((uint64_t)n * s->length > (64u * 1024 * 1024))
         return native_throw(ctx, r, "RangeError: repeat count too large");
@@ -1945,11 +1963,15 @@ static bool object_has_own_key(JsContext *ctx, JsObject *ob, JsValue key, bool *
     if (!ks)
         return false;
     if (ob->obj_kind == JS_OBJ_ARRAY) {
-        /* index check */
+        /* index check; bounds-check before the cast: (uint32_t)d is UB for
+         * d outside [0, UINT32_MAX], e.g. Object.hasOwn(arr, "1e20") */
         double d = js_units_to_number(ks->units, ks->length);
-        if (d >= 0 && d == __builtin_floor(d) && (idx = (uint32_t)d) < ob->elem_count) {
-            *out = true;
-            return true;
+        if (d >= 0 && d < 4294967296.0 && d == __builtin_floor(d)) {
+            idx = (uint32_t)d;
+            if (idx < ob->elem_count) {
+                *out = true;
+                return true;
+            }
         }
     }
     JsString *ik = js_intern_cell(ctx->vm, ks);
@@ -2355,7 +2377,7 @@ static bool str_fromCharCode(JsContext *ctx, JsValue tv, const JsValue *args, in
     StrBuf sb;
     sb_init(&sb, ctx->vm);
     for (int i = 0; i < argc; i++)
-        sb_unit(&sb, (uint16_t)(uint32_t)js_to_number_value(ctx, args[i]));
+        sb_unit(&sb, to_uint16(js_to_number_value(ctx, args[i])));
     *r = sb_finish(&sb);
     return js_is_undefined(*r) && argc ? oom(ctx, r) : true;
 }
@@ -2365,7 +2387,15 @@ static bool str_fromCodePoint(JsContext *ctx, JsValue tv, const JsValue *args, i
     StrBuf sb;
     sb_init(&sb, ctx->vm);
     for (int i = 0; i < argc; i++) {
-        uint32_t cp = (uint32_t)js_to_number_value(ctx, args[i]);
+        double d = js_to_number_value(ctx, args[i]);
+        /* real RangeError, not a garbage cast, for an invalid code point —
+         * String.fromCodePoint(-1) / (1e20) previously cast an out-of-range
+         * double straight to uint32_t (UB) */
+        if (!(d >= 0 && d <= 0x10FFFF) || d != __builtin_floor(d)) {
+            sb_free(&sb);
+            return native_throw(ctx, r, "RangeError: invalid code point");
+        }
+        uint32_t cp = (uint32_t)d;
         if (cp > 0xFFFF) {
             cp -= 0x10000;
             sb_unit(&sb, (uint16_t)(0xD800 + (cp >> 10)));

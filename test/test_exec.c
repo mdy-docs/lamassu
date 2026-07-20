@@ -273,6 +273,11 @@ static void test_objects_arrays(void) {
     expect_error("let a = [1]; a.length = -1;", RUN_RUNTIME_ERR, "RangeError");
     expect_error("let a = [1]; a.length = 1e20;", RUN_RUNTIME_ERR, "RangeError");
     expect_error("let a = [1]; a.length = 1.5;", RUN_RUNTIME_ERR, "RangeError");
+    /* same UB class in computed property access (value_to_index) — a huge
+     * or negative numeric key just isn't a valid index, not a crash */
+    expect_result("let a = [1, 2, 3]; a[1e20];", "undefined");
+    expect_result("let a = [1, 2, 3]; a[-1];", "undefined");
+    expect_result("let a = []; a[1e20] = 'x'; a.length;", "0");
     expect_result("let o = {}; o[1] = 'x'; o['1'];", "x");
     expect_result("let n = {a: {b: {c: 42}}}; n['a']['b'].c;", "42");
     expect_result("let shorthand = 7; let o = {shorthand}; o.shorthand;", "7");
