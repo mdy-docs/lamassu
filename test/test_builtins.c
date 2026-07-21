@@ -52,8 +52,10 @@ static char *run(const char *src, bool stress, bool *ok) {
         *ok = false;
     } else {
         js_gc_protect(vm, &fn);
-        JsValue res;
-        *ok = js_run_module(ctx, fn, &res);
+        JsValue p = js_run_module(ctx, fn);
+        int st = js_promise_state(p);
+        *ok = st == 0 || st == 1;
+        JsValue res = js_promise_result(p);
         js_gc_protect(vm, &res);
         JsValue s = js_to_string(ctx, res);
         size_t sl;

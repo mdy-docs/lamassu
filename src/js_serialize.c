@@ -149,6 +149,7 @@ const JsOpInfo js_op_info[JS_OP__COUNT] = {
     OP(JS_OP_GET_IMPORT, OPF_IMPORT_IDX, CF_NEXT, +1, 0, 2),
     OP(JS_OP_IMPORT_NS, OPF_IMPORT_IDX, CF_NEXT, +1, 0, 2),
     OP(JS_OP_NEW_REGEXP, OPF_REGEXP, CF_NEXT, +1, 0, 4),
+    OP(JS_OP_DYNAMIC_IMPORT, OPF_NONE, CF_NEXT, 0, 1, 0),
 };
 #undef OP
 
@@ -278,7 +279,7 @@ static void write_header(OutBuf *b, uint32_t kind) {
     out_u8(b, 'C');
     out_u32(b, JSBC_VERSION);
     uint32_t flags = 0;
-#ifdef JSVM_HAS_REGEX
+#ifdef LAMASSU_HAS_REGEX
     flags |= JSBC_FLAG_HAS_REGEX;
 #endif
     out_u32(b, flags);
@@ -423,8 +424,9 @@ static JsFunctionCell *load_fn(JsContext *ctx, InBuf *b, uint32_t depth,
         return NULL;
     }
     JsFunctionCell *fn = (JsFunctionCell *)c;
-    memset(fn, 0, sizeof *fn);
-    fn->gc.kind = JS_KIND_FUNCTION;
+    /* zero the body only — offset 0 is the GC header, and clobbering
+     * gc.next would orphan every older cell in the allocation chain */
+    memset((char *)fn + sizeof(JsGcCell), 0, sizeof *fn - sizeof(JsGcCell));
     fn->n_params = n_params;
     fn->fn_flags = fn_flags;
     fn->n_locals = n_locals;
@@ -697,7 +699,7 @@ static bool verify_pass1(JsFunctionCell *fn, uint8_t *boundary, bool is_module,
             }
             break;
         case OPF_REGEXP:
-#ifndef JSVM_HAS_REGEX
+#ifndef LAMASSU_HAS_REGEX
             *err = "SyntaxError: regex bytecode in a build without regex support";
             return false;
 #else
@@ -1133,38 +1135,29 @@ static void wire_module(JsFunctionCell *fn, JsModule *m) {
     }
 }
 
-JsModule *js_bc_load_module(JsContext *ctx, const uint8_t *buf, size_t len,
-                            JsString *canon_spec, const char **err) {
+bool js_bc_load_module(JsContext *ctx, JsModule *m, const uint8_t *buf, size_t len,
+                       const char **err) {
     JsVm *vm = ctx->vm;
     *err = NULL;
     InBuf b = {buf, buf + len, false};
     int kind = read_header(&b, err);
     if (kind < 0)
-        return NULL;
+        return false;
     if (kind != JS_BC_MODULE) {
         *err = "SyntaxError: expected a module bytecode buffer, got a script";
-        return NULL;
+        return false;
     }
 
-    /* Allocate the module cell first and keep it rooted; its owned arrays and
-     * the body are attached as they load, so a mid-load GC stays consistent. */
-    JsGcCell *cell = js_gc_new_cell(vm, JS_KIND_MODULE, sizeof(JsModule));
-    if (!cell) {
-        *err = "out of memory";
-        return NULL;
-    }
-    JsModule *m = (JsModule *)cell;
-    memset((char *)m + sizeof(JsGcCell), 0, sizeof *m - sizeof(JsGcCell));
-    m->specifier = canon_spec; /* identity/cache key from the resolver */
-    m->eval_error = js_undefined();
-    m->status = JS_MOD_UNLINKED;
-
-    JsValue mv = js_value_from_cell(cell);
+    /* The caller provides the (registered, rooted-via-registry) module cell;
+     * its owned arrays and the body are attached as they load, so a mid-load
+     * GC stays consistent. On failure the partial fill is left on the cell —
+     * the caller marks it ERRORED and the sweep reclaims the arrays. */
+    JsValue mv = js_value_from_cell(&m->gc);
     if (!js_gc_protect(vm, &mv)) {
         *err = "out of memory";
-        return NULL;
+        return false;
     }
-    JsModule *result = NULL;
+    bool result = false;
 
     /* the record's own embedded specifier (kept only if needed; identity uses
      * canon_spec). Reading it also advances past the field. */
@@ -1279,8 +1272,19 @@ JsModule *js_bc_load_module(JsContext *ctx, const uint8_t *buf, size_t len,
     if (!verify_fn(ctx, body, /*is_module=*/true, m->import_count, err))
         goto done;
 
-    result = (JsModule *)js_value_cell(mv);
+    result = true;
 done:
     js_gc_unprotect(vm, &mv);
     return result;
+}
+
+JsValue js_bytecode_value(JsContext *ctx, const uint8_t *buf, size_t len) {
+    JsGcCell *cell = js_gc_new_cell(ctx->vm, JS_KIND_BYTECODE, sizeof(JsBytecode) + len);
+    if (!cell)
+        return js_undefined();
+    JsBytecode *bc = (JsBytecode *)cell;
+    bc->length = len;
+    if (len)
+        memcpy(bc->bytes, buf, len);
+    return js_value_from_cell(cell);
 }

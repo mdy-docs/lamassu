@@ -89,8 +89,10 @@ static RunStatus run_src_opts(const char *src, const RunOpts *opts, char **out) 
         status = RUN_COMPILE_ERR;
     } else {
         js_gc_protect(vm, &fn);
-        JsValue result;
-        bool ok = js_run_module(ctx, fn, &result);
+        JsValue p = js_run_module(ctx, fn);
+        int st = js_promise_state(p);
+        bool ok = st == 0 || st == 1;
+        JsValue result = js_promise_result(p);
         js_gc_protect(vm, &result);
         JsValue str = js_to_string(ctx, result);
         size_t slen;

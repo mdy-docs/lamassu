@@ -159,6 +159,6 @@ protocol, named capture groups, and `/d` (indices) all work.
 `parseInt`, `parseFloat`, `isNaN`, `isFinite`.
 
 `print(...)` is **not** a language built-in — it's a host-provided native,
-registered by the CLI (`tools/jsvm_cli.c`) and the npm package's WASM glue
-(`src/wasm_api.c`) for convenience, not part of `libjsvm` itself. An
+registered by the CLI (`tools/lamassu.c`) and the npm package's WASM glue
+(`src/wasm_api.c`) for convenience, not part of `liblamassu` itself. An
 embedder that doesn't register it won't have it.

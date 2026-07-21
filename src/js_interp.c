@@ -2,7 +2,7 @@
 #include "js_date.h"
 #include "js_mapobj.h"
 #include "js_setobj.h"
-#ifdef JSVM_HAS_REGEX
+#ifdef LAMASSU_HAS_REGEX
 #include "js_regexp.h"
 #endif
 
@@ -82,7 +82,7 @@ JsString *js_to_string_cell(JsContext *ctx, JsValue v, int depth) {
         return js_ascii_cell(vm, "[object Promise]");
     if (js_is_object(v)) {
         JsObject *o = js_value_object(v);
-#ifdef JSVM_HAS_REGEX
+#ifdef LAMASSU_HAS_REGEX
         if (o->obj_kind == JS_OBJ_REGEXP)
             return js_regexp_repr(ctx, o);
 #endif
@@ -420,7 +420,7 @@ static JsPropStatus get_property(JsContext *ctx, JsValue base, JsValue key,
     }
     if (js_is_object(base)) {
         JsObject *o = js_value_object(base);
-#ifdef JSVM_HAS_REGEX
+#ifdef LAMASSU_HAS_REGEX
         if (o->obj_kind == JS_OBJ_REGEXP) {
             /* synthesized props (source, lastIndex, ...) shadow everything */
             bool handled = false;
@@ -538,7 +538,7 @@ static JsPropStatus set_property(JsContext *ctx, JsValue base, JsValue key,
         return JS_PROP_TYPE_ERROR;
     }
     JsObject *o = js_value_object(base);
-#ifdef JSVM_HAS_REGEX
+#ifdef LAMASSU_HAS_REGEX
     if (o->obj_kind == JS_OBJ_REGEXP) {
         bool handled = false;
         if (!js_regexp_prop_set(ctx, o, key, val, &handled, errmsg))
@@ -1388,7 +1388,7 @@ run:; /* (re)load the top frame */
             case JS_OP_NEW_REGEXP: {
                 uint16_t csrc = READ_U16();
                 uint16_t cflags = READ_U16();
-#ifdef JSVM_HAS_REGEX
+#ifdef LAMASSU_HAS_REGEX
                 /* pattern/flag atoms stay alive as consts of the running fn */
                 JsString *src = js_value_string(K[csrc]);
                 JsString *flg = js_value_string(K[cflags]);
@@ -1849,6 +1849,18 @@ run:; /* (re)load the top frame */
                 ip = ret;
                 break;
             }
+            case JS_OP_DYNAMIC_IMPORT: {
+                /* Kick off (or join) a module load and push its promise —
+                 * shaped like a native returning js_promise_new(), NOT like
+                 * AWAIT: the current fiber keeps running. */
+                fr->ip = ip;
+                fb->err_pos = lookup_pos(fn, op_ip);
+                JsValue promise = js_module_dynamic_import(ctx, fn->module, PEEK(0));
+                if (!js_is_promise(promise))
+                    RT_THROW("out of memory");
+                fb->stack[fb->sp - 1] = promise; /* replace the specifier */
+                break;
+            }
             case JS_OP_AWAIT: {
                 /* Leave the awaited value on the stack (keeps it rooted);
                  * resume replaces it with the settled value or throws. */
@@ -2152,36 +2164,46 @@ JsValue js_compile_module_repl(JsContext *ctx, const uint16_t *src, size_t len,
     return compile_module_impl(ctx, src, len, true, err_msg, err_pos);
 }
 
-bool js_run_module(JsContext *ctx, JsValue fnv, JsValue *result) {
+JsValue js_run_module(JsContext *ctx, JsValue fnv) {
     JsVm *vm = ctx->vm;
-    if (!js_is_function(fnv)) {
-        *result = js_undefined();
-        return false;
-    }
+    if (!js_is_function(fnv))
+        return js_undefined();
     JsFunctionCell *fn = js_value_function(fnv);
     JsClosure *cl = closure_new(vm, fn);
-    if (!cl) {
-        *result = js_undefined();
-        return false;
-    }
+    if (!cl)
+        return js_undefined();
     bool is_async = (fn->fn_flags & JS_FN_ASYNC) != 0; /* top-level await */
 
     if (!is_async) {
-        /* Sync module: run to completion, then drain microtasks it scheduled
-         * (e.g. Promise.resolve().then(...) at top level). */
-        bool ok = run_closure(ctx, cl, js_undefined(), NULL, 0, result);
+        /* Sync module: run to completion, drain microtasks it scheduled
+         * (e.g. Promise.resolve().then(...) at top level), and wrap the
+         * outcome in an already-settled promise. */
+        JsValue result;
+        bool ok = run_closure(ctx, cl, js_undefined(), NULL, 0, &result);
         js_run_jobs(ctx);
-        return ok;
+        js_gc_protect(vm, &result);
+        JsPromise *p = js_promise_alloc(ctx);
+        js_gc_unprotect(vm, &result);
+        if (!p)
+            return js_undefined();
+        if (ok)
+            js_promise_fulfill(ctx, p, result);
+        else
+            js_promise_reject(ctx, p, result);
+        return js_value_from_cell(&p->gc);
     }
 
-    /* TLA module: drive as an async fiber, drain jobs until it settles. */
+    /* TLA module: drive as an async fiber, drain the jobs available now, and
+     * return the result promise in whatever state it reached — a promise
+     * still pending here is genuinely waiting on the host, which keeps the
+     * suspended fiber alive through this promise's AWAIT reaction and
+     * settles it on a later js_run_jobs() turn. */
     JsValue clv = js_value_from_cell(&cl->gc);
     js_gc_protect(vm, &clv); /* root cl before the promise allocation GCs */
     JsPromise *p = js_promise_alloc(ctx);
     if (!p) {
         js_gc_unprotect(vm, &clv);
-        *result = js_undefined();
-        return false;
+        return js_undefined();
     }
     JsValue pv = js_value_from_cell(&p->gc);
     js_gc_protect(vm, &pv);
@@ -2190,10 +2212,12 @@ bool js_run_module(JsContext *ctx, JsValue fnv, JsValue *result) {
                               NULL, 0, &err);
     if (!fb) {
         js_gc_unprotect(vm, &clv);
-        js_gc_unprotect(vm, &pv);
         JsString *s = js_ascii_cell(vm, err);
-        *result = s ? js_value_from_cell(&s->gc) : js_undefined();
-        return false;
+        js_promise_reject(ctx, js_value_promise(pv),
+                          s ? js_value_from_cell(&s->gc) : js_undefined());
+        JsValue out = pv;
+        js_gc_unprotect(vm, &pv);
+        return out;
     }
     fb->result_promise = js_value_promise(pv);
     fb->is_async = true;
@@ -2201,22 +2225,9 @@ bool js_run_module(JsContext *ctx, JsValue fnv, JsValue *result) {
     advance_fiber(ctx, fb, &tmp);
     js_run_jobs(ctx);
     js_gc_unprotect(vm, &clv);
-
-    JsPromise *rp = js_value_promise(pv);
-    bool ok;
-    if (rp->state == JS_PROMISE_REJECTED) {
-        *result = rp->value;
-        ok = false;
-    } else if (rp->state == JS_PROMISE_FULFILLED) {
-        *result = rp->value;
-        ok = true;
-    } else {
-        /* still pending: awaited something that never settled */
-        *result = js_undefined();
-        ok = true;
-    }
+    JsValue out = pv;
     js_gc_unprotect(vm, &pv);
-    return ok;
+    return out;
 }
 
 JsValue js_to_string(JsContext *ctx, JsValue v) {

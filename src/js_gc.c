@@ -3,7 +3,7 @@
 #include "js_date.h"
 #include "js_mapobj.h"
 #include "js_setobj.h"
-#ifdef JSVM_HAS_REGEX
+#ifdef LAMASSU_HAS_REGEX
 #include "js_regexp.h"
 #endif
 
@@ -34,7 +34,8 @@ void js_gc_mark_cell(JsVm *vm, JsGcCell *c) {
     if (!c || c->mark)
         return;
     c->mark = 1;
-    if (c->kind != JS_KIND_STRING) /* strings have no children */
+    /* strings and bytecode buffers have no children */
+    if (c->kind != JS_KIND_STRING && c->kind != JS_KIND_BYTECODE)
         js_mark_push(vm, c);
 }
 
@@ -59,7 +60,7 @@ static void js_gc_trace(JsVm *vm) {
             for (uint32_t i = 0; i < o->elem_count; i++)
                 js_gc_mark_value(vm, o->elems[i]);
             js_gc_mark_value(vm, o->proto);
-#ifdef JSVM_HAS_REGEX
+#ifdef LAMASSU_HAS_REGEX
             if (o->obj_kind == JS_OBJ_REGEXP)
                 js_regexp_mark(vm, o);
 #endif
@@ -143,6 +144,7 @@ static void js_gc_trace(JsVm *vm) {
             break;
         }
         case JS_KIND_STRING:
+        case JS_KIND_BYTECODE:
             break;
         }
     }
@@ -163,7 +165,7 @@ void js_gc_free_cell(JsVm *vm, JsGcCell *c, bool remove_atoms) {
         js_map_free(vm, &o->props);
         js_realloc_raw(vm, o->elems, (size_t)o->elem_cap * sizeof(JsValue), 0);
         size = sizeof *o;
-#ifdef JSVM_HAS_REGEX
+#ifdef LAMASSU_HAS_REGEX
         if (o->obj_kind == JS_OBJ_REGEXP)
             size = js_regexp_release(vm, o);
 #endif
@@ -217,6 +219,11 @@ void js_gc_free_cell(JsVm *vm, JsGcCell *c, bool remove_atoms) {
         js_module_free_cell(vm, (JsModule *)c);
         size = sizeof(JsModule);
         break;
+    case JS_KIND_BYTECODE: {
+        JsBytecode *bc = (JsBytecode *)c;
+        size = sizeof *bc + bc->length;
+        break;
+    }
     }
     vm->cell_count--;
     js_realloc_raw(vm, c, size, 0);

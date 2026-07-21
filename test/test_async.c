@@ -143,8 +143,10 @@ static char *run(const char *src, bool stress, bool *ok) {
         *ok = false;
     } else {
         js_gc_protect(vm, &fn);
-        JsValue res;
-        *ok = js_run_module(ctx, fn, &res);
+        JsValue p = js_run_module(ctx, fn);
+        int st = js_promise_state(p);
+        *ok = st == 0 || st == 1;
+        JsValue res = js_promise_result(p);
         js_gc_protect(vm, &res);
         /* settle any deferred host promises, then re-drain */
         flush_deferred(ctx);
@@ -293,6 +295,81 @@ static void test_ordering(void) {
        "123");
 }
 
+/*
+ * A genuinely still-pending completion must be exposed to the host as a live
+ * promise — settled on a later, initially-quiescent turn — rather than
+ * silently reported as done. This is the cross-turn scenario a single-drain
+ * test can't catch: between js_run_module and the settlement there are no
+ * queued jobs at all, and a full GC runs, so the suspended fiber survives
+ * only through the host-protected result promise's reaction chain.
+ */
+static void test_pending_promise_exposed(bool stress) {
+    CountAlloc ca = {0, 0};
+    JsVmConfig cfg = {.realloc_fn = count_realloc, .alloc_ud = &ca, .gc_stress = stress};
+    JsVm *vm = js_vm_new(&cfg);
+    JsContext *ctx = js_context_new(vm);
+    g_deferred.vm = vm;
+    g_deferred.count = 0;
+    memset(g_reject_flag, 0, sizeof g_reject_flag);
+    static const uint16_t n_defer[] = {'d', 'e', 'f', 'e', 'r'};
+    js_register_native(ctx, n_defer, 5, native_defer, NULL);
+
+    const char *src = "let v = await defer('cross'); v + '-turn';";
+    size_t len = strlen(src);
+    uint16_t *u = malloc(len * sizeof(uint16_t));
+    for (size_t i = 0; i < len; i++)
+        u[i] = (uint16_t)(unsigned char)src[i];
+    const char *em;
+    uint32_t ep;
+    JsValue fn = js_compile_module(ctx, u, len, &em, &ep);
+    free(u);
+    js_gc_protect(vm, &fn);
+
+    JsValue p = js_run_module(ctx, fn);
+    js_gc_protect(vm, &p);
+
+    /* truly quiescent gap: the fiber is suspended, nothing is queued */
+    checks_run++;
+    if (js_promise_state(p) != 0 || g_deferred.count != 1 || js_has_pending_jobs(ctx)) {
+        checks_failed++;
+        fprintf(stderr, "FAIL pending-exposure: state=%d deferred=%d jobs=%d\n",
+                js_promise_state(p), g_deferred.count, js_has_pending_jobs(ctx));
+    }
+
+    /* a full collection in the gap must not reclaim the suspended fiber */
+    js_gc_collect(vm);
+
+    /* the host's later turn: settle the awaited promise, drain */
+    js_resolve(ctx, g_deferred.promises[0], g_deferred.values[0]);
+    js_gc_unprotect(vm, &g_deferred.values[0]);
+    js_gc_unprotect(vm, &g_deferred.promises[0]);
+    g_deferred.count = 0;
+    js_run_jobs(ctx);
+
+    checks_run++;
+    JsValue s = js_to_string(ctx, js_promise_result(p));
+    size_t sl;
+    const uint16_t *su = js_string_units(s, &sl);
+    char out[32] = {0};
+    for (size_t i = 0; i < sl && i < sizeof out - 1; i++)
+        out[i] = su && su[i] < 128 ? (char)su[i] : '?';
+    if (js_promise_state(p) != 1 || strcmp(out, "cross-turn") != 0) {
+        checks_failed++;
+        fprintf(stderr, "FAIL pending-exposure settle: state=%d result=%s\n",
+                js_promise_state(p), out);
+    }
+
+    js_gc_unprotect(vm, &p);
+    js_gc_unprotect(vm, &fn);
+    js_vm_free(vm);
+    checks_run++;
+    if (ca.net_bytes != 0 || ca.live_allocs != 0) {
+        checks_failed++;
+        fprintf(stderr, "FAIL pending-exposure leak (net=%ld allocs=%ld)\n", ca.net_bytes,
+                ca.live_allocs);
+    }
+}
+
 int main(void) {
     test_then();
     test_async_await();
@@ -300,6 +377,8 @@ int main(void) {
     test_promise_combinators();
     test_ctor_executor();
     test_ordering();
+    test_pending_promise_exposed(false);
+    test_pending_promise_exposed(true);
     (void)err;
     if (checks_failed) {
         fprintf(stderr, "%d/%d async checks FAILED\n", checks_failed, checks_run);

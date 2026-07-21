@@ -77,8 +77,10 @@ static char *repl_eval(Repl *r, const char *src) {
         strcpy(out + 1, em);
     } else {
         js_gc_protect(r->vm, &fn);
-        JsValue res;
-        bool ok = js_run_module(r->ctx, fn, &res);
+        JsValue p = js_run_module(r->ctx, fn);
+        int st = js_promise_state(p);
+        bool ok = st == 0 || st == 1;
+        JsValue res = js_promise_result(p);
         js_gc_protect(r->vm, &res);
         JsValue s = js_to_string(r->ctx, res);
         size_t sl;

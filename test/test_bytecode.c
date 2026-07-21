@@ -76,8 +76,10 @@ static char *run_source(const char *src, bool *ok) {
         *ok = false;
     } else {
         js_gc_protect(vm, &fn);
-        JsValue res;
-        *ok = js_run_module(ctx, fn, &res);
+        JsValue p = js_run_module(ctx, fn);
+        int st = js_promise_state(p);
+        *ok = st == 0 || st == 1;
+        JsValue res = js_promise_result(p);
         js_gc_protect(vm, &res);
         out = narrow(ctx, res);
     }
@@ -147,8 +149,10 @@ static char *roundtrip(const char *src, int n_runs, bool *ok, bool *load_ok) {
         char *prev = NULL;
         *ok = true;
         for (int i = 0; i < n_runs; i++) {
-            JsValue res;
-            bool rok = js_run_module(ctx2, lfn, &res);
+            JsValue p = js_run_module(ctx2, lfn);
+            int st = js_promise_state(p);
+            bool rok = st == 0 || st == 1;
+            JsValue res = js_promise_result(p);
             js_gc_protect(vm2, &res);
             char *r = narrow(ctx2, res);
             js_gc_unprotect(vm2, &res);
@@ -218,12 +222,15 @@ static void test_roundtrip(void) {
     eq("switch (2) { case 1: 'one'; break; case 2: 'two'; break; default: 'other'; }", "two");
     eq("JSON.stringify({x:[1,2,3]});", "{\"x\":[1,2,3]}");
     eq("Math.max(3, 7, 2) + Math.min(9, 4);", "11");
-#ifdef JSVM_HAS_REGEX
+#ifdef LAMASSU_HAS_REGEX
     eq("'a1b2c3'.replace(/[0-9]/g, '#');", "a#b#c#"); /* NEW_REGEXP const survives */
     eq("/(?<y>\\d+)/.exec('x42').groups.y;", "42");
 #endif
     /* deeply nested closures exercise recursive function-const serialization */
     eq("const f = a => b => c => d => a+b+c+d; f(1)(2)(3)(4);", "10");
+    /* JS_OP_DYNAMIC_IMPORT survives the round-trip (no loader registered, so
+     * calling it yields a rejected promise — typeof proves the value shape) */
+    eq("function load(s) { return import(s); } typeof load(0).then;", "function");
 }
 
 static void test_vs_direct(void) {
@@ -282,8 +289,7 @@ static bool try_load_and_run_on(JsContext *ctx, JsVm *vm, const uint8_t *buf,
     if (loaded) {
         js_gc_protect(vm, &fn);
         js_context_set_fuel(ctx, 2000000);
-        JsValue res;
-        (void)js_run_module(ctx, fn, &res); /* result irrelevant; must not crash */
+        (void)js_run_module(ctx, fn); /* result irrelevant; must not crash */
         js_context_set_fuel(ctx, 0);
         js_gc_unprotect(vm, &fn);
     }

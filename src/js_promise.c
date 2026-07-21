@@ -82,8 +82,8 @@ void js_gc_mark_jobs(JsVm *vm) {
         if (j->fiber)
             js_gc_mark_cell(vm, &j->fiber->gc);
     }
-    JsJob *j = vm->running_job;
-    if (j) {
+    /* the running-job stack: every job with a handler still on the C stack */
+    for (JsJob *j = vm->running_job; j; j = j->next) {
         js_gc_mark_value(vm, j->value);
         js_gc_mark_value(vm, j->on_fulfilled);
         js_gc_mark_value(vm, j->on_rejected);
@@ -281,12 +281,17 @@ void js_run_jobs(JsContext *ctx) {
         vm->jobs_head = job->next;
         if (!vm->jobs_head)
             vm->jobs_tail = NULL;
-        vm->running_job = job; /* keep its values rooted while it runs */
+        /* Reentrancy: a job handler may drain jobs itself (e.g. a module
+         * continuation running a body via js_run_module). running_job is a
+         * stack, linked through the popped job's now-free `next`, so every
+         * in-flight job stays rooted across nested drains. */
+        job->next = vm->running_job;
+        vm->running_job = job;
         if (job->kind == RX_AWAIT)
             js_resume_fiber(ctx, job->fiber, job->value, job->is_throw);
         else
             run_then_job(ctx, job);
-        vm->running_job = NULL;
+        vm->running_job = job->next;
         job_recycle(vm, job);
     }
 }
@@ -314,6 +319,19 @@ bool js_reject(JsContext *ctx, JsValue promise, JsValue reason) {
         return false;
     js_promise_reject(ctx, js_value_promise(promise), reason);
     return true;
+}
+
+int js_promise_state(JsValue v) {
+    if (!js_is_promise(v))
+        return -1;
+    return (int)js_value_promise(v)->state;
+}
+
+JsValue js_promise_result(JsValue v) {
+    if (!js_is_promise(v))
+        return js_undefined();
+    JsPromise *p = js_value_promise(v);
+    return p->state == JS_PROMISE_PENDING ? js_undefined() : p->value;
 }
 
 /* ===================================================================

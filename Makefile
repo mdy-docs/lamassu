@@ -1,4 +1,4 @@
-# jsvm — native test build + WebAssembly package build.
+# lamassu — native test build + WebAssembly package build.
 #
 # make test        build and run unit tests (plain + ASan/UBSan)
 # make bench       build the CLI and run bench/*.js, reporting ops/sec
@@ -21,10 +21,10 @@ INC := -Iinclude -Isrc
 
 ASAN := -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer
 
-# Regex engine (third_party/baru-re), enabled via -DJSVM_HAS_REGEX in every
+# Regex engine (third_party/baru-re), enabled via -DLAMASSU_HAS_REGEX in every
 # build. Compiled as separate objects because re_vm.c contains three VLAs the
 # engine's own build permits — the engine keeps every other strict flag,
-# jsvm code keeps -Wvla.
+# lamassu code keeps -Wvla.
 RE_INC  := -Ithird_party/baru-re/include
 RE_WARN := -std=c11 -Wall -Wextra -Werror -Wshadow
 RE_SRC  := third_party/baru-re/src/re_lexer.c third_party/baru-re/src/re_parser.c \
@@ -33,7 +33,7 @@ RE_HDR  := third_party/baru-re/include/regexp.h third_party/baru-re/include/ucd.
 RE_OBJ      := build/re_lexer.o build/re_parser.o build/re_compiler.o build/re_vm.o
 RE_OBJ_ASAN := build/re_lexer_asan.o build/re_parser_asan.o build/re_compiler_asan.o \
                build/re_vm_asan.o
-REGEX_FLAGS := -DJSVM_HAS_REGEX $(RE_INC)
+REGEX_FLAGS := -DLAMASSU_HAS_REGEX $(RE_INC)
 
 build/re_%_asan.o: third_party/baru-re/src/re_%.c $(RE_HDR)
 	@mkdir -p build
@@ -115,6 +115,14 @@ build/test_bytecode_asan: $(SRC) test/test_bytecode.c $(HDR) $(RE_OBJ_ASAN)
 	@mkdir -p build
 	$(CC) $(WARNINGS) $(ASAN) $(INC) $(REGEX_FLAGS) $(SRC) $(RE_OBJ_ASAN) test/test_bytecode.c -o $@
 
+build/test_dynamic_import: $(SRC) test/test_dynamic_import.c $(HDR) $(RE_OBJ)
+	@mkdir -p build
+	$(CC) $(WARNINGS) $(CFLAGS) $(INC) $(REGEX_FLAGS) $(SRC) $(RE_OBJ) test/test_dynamic_import.c -o $@
+
+build/test_dynamic_import_asan: $(SRC) test/test_dynamic_import.c $(HDR) $(RE_OBJ_ASAN)
+	@mkdir -p build
+	$(CC) $(WARNINGS) $(ASAN) $(INC) $(REGEX_FLAGS) $(SRC) $(RE_OBJ_ASAN) test/test_dynamic_import.c -o $@
+
 build/test_module_bc: $(SRC) test/test_module_bc.c $(HDR) $(RE_OBJ)
 	@mkdir -p build
 	$(CC) $(WARNINGS) $(CFLAGS) $(INC) $(REGEX_FLAGS) $(SRC) $(RE_OBJ) test/test_module_bc.c -o $@
@@ -123,12 +131,12 @@ build/test_module_bc_asan: $(SRC) test/test_module_bc.c $(HDR) $(RE_OBJ_ASAN)
 	@mkdir -p build
 	$(CC) $(WARNINGS) $(ASAN) $(INC) $(REGEX_FLAGS) $(SRC) $(RE_OBJ_ASAN) test/test_module_bc.c -o $@
 
-# the jsvm CLI: compile + run a .js file
+# the lamassu CLI: compile + run a .js file
 .PHONY: cli
-cli: build/jsvm
-build/jsvm: $(SRC) tools/jsvm_cli.c $(HDR) $(RE_OBJ)
+cli: build/lamassu
+build/lamassu: $(SRC) tools/lamassu.c $(HDR) $(RE_OBJ)
 	@mkdir -p build
-	$(CC) $(WARNINGS) $(CFLAGS) $(INC) $(REGEX_FLAGS) $(SRC) $(RE_OBJ) tools/jsvm_cli.c -o $@
+	$(CC) $(WARNINGS) $(CFLAGS) $(INC) $(REGEX_FLAGS) $(SRC) $(RE_OBJ) tools/lamassu.c -o $@
 
 .PHONY: test
 test: build/test_runner build/test_runner_asan build/test_syntax build/test_syntax_asan \
@@ -136,7 +144,8 @@ test: build/test_runner build/test_runner_asan build/test_syntax build/test_synt
       build/test_async build/test_async_asan build/test_modules build/test_modules_asan \
       build/test_repl build/test_repl_asan build/test_regex build/test_regex_asan \
       build/test_bytecode build/test_bytecode_asan \
-      build/test_module_bc build/test_module_bc_asan
+      build/test_module_bc build/test_module_bc_asan \
+      build/test_dynamic_import build/test_dynamic_import_asan
 	./build/test_runner
 	./build/test_runner_asan
 	./build/test_syntax
@@ -157,6 +166,8 @@ test: build/test_runner build/test_runner_asan build/test_syntax build/test_synt
 	./build/test_bytecode_asan
 	./build/test_module_bc
 	./build/test_module_bc_asan
+	./build/test_dynamic_import
+	./build/test_dynamic_import_asan
 
 # Benchmarks (bench/*.js): -O2 release build, no ASan overhead, so numbers
 # reflect real interpreter performance. Each script self-times with Date.now()
@@ -164,10 +175,10 @@ test: build/test_runner build/test_runner_asan build/test_syntax build/test_synt
 # Gates the "opt" roadmap phase in docs/plan.md (shapes + inline caches for
 # property access) — that work is deferred until these numbers say it matters.
 .PHONY: bench
-bench: build/jsvm
+bench: build/lamassu
 	@for f in bench/*.js; do \
 	  case "$$f" in */_util.js) continue ;; esac; \
-	  ./build/jsvm "$$f" || exit 1; \
+	  ./build/lamassu "$$f" || exit 1; \
 	done
 
 # npm package artifact: the engine's REPL surface compiled to an ES module
@@ -190,7 +201,7 @@ $(PKG_DIST)/lamassu.mjs: $(SRC) src/wasm_api.c $(HDR) $(RE_SRC) $(RE_HDR)
 	  -sMODULARIZE=1 -sEXPORT_ES6=1 -sEXPORT_NAME=createLamassuModule \
 	  -sENVIRONMENT=web,node \
 	  -sSTACK_SIZE=8388608 -sSTACK_OVERFLOW_CHECK=2 \
-	  -sEXPORTED_FUNCTIONS=_jsvm_eval,_jsvm_reset,_jsvm_settle_deferred,_malloc,_free \
+	  -sEXPORTED_FUNCTIONS=_lamassu_eval,_lamassu_reset,_lamassu_settle_deferred,_malloc,_free \
 	  -sEXPORTED_RUNTIME_METHODS=ccall,cwrap,UTF8ToString,stringToUTF8,lengthBytesUTF8 \
 	  -sASYNCIFY -sASYNCIFY_STACK_SIZE=262144 \
 	  -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=16777216 \
@@ -202,4 +213,4 @@ web: pkg
 
 .PHONY: clean
 clean:
-	rm -rf build $(PKG_DIST) web/jsvm.js web/jsvm.wasm
+	rm -rf build $(PKG_DIST)

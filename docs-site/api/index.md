@@ -5,7 +5,7 @@ lamassu-js has two embedding surfaces:
 - **[npm package](/api/npm-package)** — `@mdy-docs/lamassu-js`, the engine
   compiled to a WebAssembly ES module with a small JS wrapper. Use this from
   Node or the browser.
-- **[C embedding API](/api/c-embedding)** — the native `libjsvm` C library
+- **[C embedding API](/api/c-embedding)** — the native `liblamassu` C library
   (`include/lamassu.h`), for embedders working directly in C, or building their
   own bindings for another host environment.
 

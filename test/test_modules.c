@@ -1,7 +1,10 @@
 /*
- * ES module tests. A tiny in-memory resolver maps specifiers to source
- * strings; each test registers a set of modules and evaluates a root,
- * asserting on a named export.
+ * ES module tests. A tiny in-memory table backs the async module loader:
+ * each entry resolves as source text (immediately or deferred to a later
+ * host turn), precompiled bytecode, or a synthetic exports object. Each
+ * test registers modules and evaluates a root via js_eval_module's promise,
+ * asserting on a named export — including genuinely cross-turn loads where
+ * the job queue is empty between rounds.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,12 +37,19 @@ static void *count_realloc(void *ud, void *ptr, size_t old_size, size_t new_size
     return p;
 }
 
-/* module table: name -> UTF-16 source */
+/* ---- module table ---- */
+
+enum { MODE_SOURCE, MODE_DEFERRED, MODE_SYNTHETIC, MODE_BYTECODE };
+
 #define MAX_MODS 16
 typedef struct {
-    char names[MAX_MODS][32];
+    char names[MAX_MODS][64];
     uint16_t *sources[MAX_MODS];
     size_t source_lens[MAX_MODS];
+    uint8_t *bytecode[MAX_MODS];
+    size_t bytecode_lens[MAX_MODS];
+    int mode[MAX_MODS];
+    int loads[MAX_MODS]; /* loader invocations per entry */
     int count;
 } ModTable;
 static ModTable g_mods;
@@ -54,25 +64,111 @@ static uint16_t *to_u16(const char *s, size_t *len) {
     return u;
 }
 
-static void mod_add(const char *name, const char *src) {
+static int mod_add_mode(const char *name, const char *src, int mode) {
     int i = g_mods.count++;
-    snprintf(g_mods.names[i], 32, "%s", name);
-    g_mods.sources[i] = to_u16(src, &g_mods.source_lens[i]);
+    snprintf(g_mods.names[i], 64, "%s", name);
+    g_mods.sources[i] = src ? to_u16(src, &g_mods.source_lens[i]) : NULL;
+    g_mods.bytecode[i] = NULL;
+    g_mods.bytecode_lens[i] = 0;
+    g_mods.mode[i] = mode;
+    g_mods.loads[i] = 0;
+    return i;
+}
+
+static void mod_add(const char *name, const char *src) {
+    mod_add_mode(name, src, MODE_SOURCE);
 }
 
 static void mods_reset(void) {
-    for (int i = 0; i < g_mods.count; i++)
+    for (int i = 0; i < g_mods.count; i++) {
         free(g_mods.sources[i]);
+        free(g_mods.bytecode[i]);
+    }
     g_mods.count = 0;
 }
 
-/* buffers for handing UTF-16 back to the resolver */
-static uint16_t g_spec_buf[128];
+static int mod_find(const char *name) {
+    for (int i = 0; i < g_mods.count; i++)
+        if (strcmp(g_mods.names[i], name) == 0)
+            return i;
+    return -1;
+}
 
-static bool resolver(void *ud, const uint16_t *spec, size_t spec_len,
-                     const uint16_t *ref, size_t ref_len, const uint16_t **out_spec,
-                     size_t *out_spec_len, const uint16_t **out_source, size_t *out_len) {
-    (void)ud;
+/* ---- deferred loads (settled by the test on a later "turn") ---- */
+
+typedef struct {
+    JsVm *vm;
+    JsValue promises[MAX_MODS];
+    int table_idx[MAX_MODS];
+    bool reject[MAX_MODS];
+    const char *reject_msg[MAX_MODS];
+    int count;
+} PendingLoads;
+static PendingLoads g_pending;
+
+/* Settles the pending load for `name` (fulfilling with its table source,
+ * or rejecting) and drains jobs; false if no such load is pending. */
+static bool settle_load(JsContext *ctx, const char *name) {
+    for (int i = 0; i < g_pending.count; i++) {
+        if (strcmp(g_mods.names[g_pending.table_idx[i]], name) != 0)
+            continue;
+        int t = g_pending.table_idx[i];
+        if (g_pending.reject[i]) {
+            size_t ml;
+            uint16_t *mu = to_u16(g_pending.reject_msg[i], &ml);
+            js_reject(ctx, g_pending.promises[i], js_atom(g_pending.vm, mu, ml));
+            free(mu);
+        } else {
+            JsValue src = js_atom(g_pending.vm, g_mods.sources[t], g_mods.source_lens[t]);
+            js_resolve(ctx, g_pending.promises[i], src);
+        }
+        js_gc_unprotect(g_pending.vm, &g_pending.promises[i]);
+        g_pending.count--;
+        for (int k = i; k < g_pending.count; k++) {
+            g_pending.promises[k] = g_pending.promises[k + 1];
+            g_pending.table_idx[k] = g_pending.table_idx[k + 1];
+            g_pending.reject[k] = g_pending.reject[k + 1];
+            g_pending.reject_msg[k] = g_pending.reject_msg[k + 1];
+            /* re-point the root slot at the moved value */
+            js_gc_unprotect(g_pending.vm, &g_pending.promises[k + 1]);
+            js_gc_protect(g_pending.vm, &g_pending.promises[k]);
+        }
+        js_run_jobs(ctx);
+        return true;
+    }
+    return false;
+}
+
+static void settle_all_loads(JsContext *ctx) {
+    while (g_pending.count > 0)
+        settle_load(ctx, g_mods.names[g_pending.table_idx[0]]);
+}
+
+/* ---- the loader + canonicalizer ---- */
+
+static JsValue fulfilled_with(JsContext *ctx, JsVm *vm, JsValue v) {
+    js_gc_protect(vm, &v);
+    JsValue p = js_promise_new(ctx);
+    js_resolve(ctx, p, v);
+    js_gc_unprotect(vm, &v);
+    return p;
+}
+
+static JsValue rejected_with_ascii(JsContext *ctx, JsVm *vm, const char *msg) {
+    size_t ml;
+    uint16_t *mu = to_u16(msg, &ml);
+    JsValue reason = js_atom(vm, mu, ml);
+    free(mu);
+    js_gc_protect(vm, &reason);
+    JsValue p = js_promise_new(ctx);
+    js_reject(ctx, p, reason);
+    js_gc_unprotect(vm, &reason);
+    return p;
+}
+
+static JsValue loader(void *ud, JsContext *ctx, const uint16_t *spec, size_t spec_len,
+                      const uint16_t *ref, size_t ref_len) {
+    JsVm *vm = ud;
     (void)ref;
     (void)ref_len;
     char name[64];
@@ -80,73 +176,158 @@ static bool resolver(void *ud, const uint16_t *spec, size_t spec_len,
     for (size_t i = 0; i < n; i++)
         name[i] = (char)spec[i];
     name[n] = 0;
-    for (int i = 0; i < g_mods.count; i++) {
-        if (strcmp(g_mods.names[i], name) == 0) {
-            /* canonical specifier = the input, echoed via a static buffer */
-            for (size_t k = 0; k < spec_len && k < 128; k++)
-                g_spec_buf[k] = spec[k];
-            *out_spec = g_spec_buf;
-            *out_spec_len = spec_len;
-            *out_source = g_mods.sources[i];
-            *out_len = g_mods.source_lens[i];
-            return true;
-        }
+    int idx = mod_find(name);
+    if (idx < 0)
+        return rejected_with_ascii(ctx, vm, "module not found");
+    g_mods.loads[idx]++;
+    switch (g_mods.mode[idx]) {
+    case MODE_SOURCE:
+        return fulfilled_with(ctx, vm,
+                              js_atom(vm, g_mods.sources[idx], g_mods.source_lens[idx]));
+    case MODE_BYTECODE:
+        return fulfilled_with(ctx, vm,
+                              js_bytecode_value(ctx, g_mods.bytecode[idx],
+                                                g_mods.bytecode_lens[idx]));
+    case MODE_SYNTHETIC: {
+        /* exports object: { default: 'cls-<name>', color: 'red' } */
+        JsValue obj = js_object_new(ctx);
+        js_gc_protect(vm, &obj);
+        char dflt[80];
+        snprintf(dflt, sizeof dflt, "cls-%s", name);
+        size_t dl, kl;
+        uint16_t *du = to_u16(dflt, &dl);
+        uint16_t *ku = to_u16("default", &kl);
+        js_object_set(vm, obj, js_atom(vm, ku, kl), js_atom(vm, du, dl));
+        free(du);
+        free(ku);
+        uint16_t *ck = to_u16("color", &kl);
+        uint16_t *cv = to_u16("red", &dl);
+        js_object_set(vm, obj, js_atom(vm, ck, kl), js_atom(vm, cv, dl));
+        free(ck);
+        free(cv);
+        JsValue p = fulfilled_with(ctx, vm, obj);
+        js_gc_unprotect(vm, &obj);
+        return p;
     }
-    return false;
+    default: { /* MODE_DEFERRED: pending until the test settles it */
+        JsValue p = js_promise_new(ctx);
+        int i = g_pending.count++;
+        g_pending.vm = vm;
+        g_pending.promises[i] = p;
+        g_pending.table_idx[i] = idx;
+        g_pending.reject[i] = false;
+        g_pending.reject_msg[i] = NULL;
+        js_gc_protect(vm, &g_pending.promises[i]);
+        return p;
+    }
+    }
 }
 
-/* Evaluates root module 'main' (added by caller); reads export `exp`, returns
- * its ToString. Sets *ok to eval success. */
-static char *eval_export(const char *root_src, const char *exp, bool *ok) {
-    CountAlloc ca = {0, 0};
-    JsVmConfig cfg = {.realloc_fn = count_realloc, .alloc_ud = &ca};
-    JsVm *vm = js_vm_new(&cfg);
-    JsContext *ctx = js_context_new(vm);
-    js_set_module_resolver(ctx, resolver, NULL);
+/* './x' resolves against the referrer's directory; '@'-prefixed specifiers
+ * fail; everything else is already canonical. */
+static uint16_t g_canon_buf[256];
+static bool canonicalize(void *ud, const uint16_t *spec, size_t spec_len,
+                         const uint16_t *ref, size_t ref_len,
+                         const uint16_t **out, size_t *out_len) {
+    (void)ud;
+    if (spec_len >= 1 && spec[0] == '@')
+        return false;
+    if (spec_len >= 2 && spec[0] == '.' && spec[1] == '/') {
+        size_t dir = 0;
+        for (size_t i = 0; i < ref_len; i++)
+            if (ref[i] == '/')
+                dir = i + 1;
+        size_t o = 0;
+        for (size_t i = 0; i < dir && o < 255; i++)
+            g_canon_buf[o++] = ref[i];
+        for (size_t i = 2; i < spec_len && o < 255; i++)
+            g_canon_buf[o++] = spec[i];
+        *out = g_canon_buf;
+        *out_len = o;
+        return true;
+    }
+    *out = spec;
+    *out_len = spec_len;
+    return true;
+}
 
-    size_t root_len;
-    uint16_t *root_u = to_u16(root_src, &root_len);
-    static const uint16_t root_spec[] = {'m', 'a', 'i', 'n'};
-    bool ev;
-    const char *em;
-    uint32_t ep;
-    JsValue ns = js_eval_module(ctx, root_spec, 4, root_u, root_len, &ev, &em, &ep);
-    js_gc_protect(vm, &ns);
-    char *out;
-    *ok = ev;
-    if (!ev) {
-        JsValue s = js_to_string(ctx, ns);
-        size_t sl;
-        const uint16_t *su = js_string_units(s, &sl);
-        out = malloc(sl + 32);
-        int p = snprintf(out, 32, "%s", em ? em : "");
-        for (size_t i = 0; i < sl; i++)
-            out[p + i] = su && su[i] < 128 ? (char)su[i] : '?';
-        out[p + sl] = 0;
-    } else {
-        size_t elen;
-        uint16_t *eu = to_u16(exp, &elen);
-        JsValue v = js_module_get_export(ctx, ns, eu, elen);
-        free(eu);
-        js_gc_protect(vm, &v);
-        JsValue s = js_to_string(ctx, v);
-        size_t sl;
-        const uint16_t *su = js_string_units(s, &sl);
-        out = malloc(sl + 1);
-        for (size_t i = 0; i < sl; i++)
-            out[i] = su && su[i] < 128 ? (char)su[i] : '?';
-        out[sl] = 0;
-        js_gc_unprotect(vm, &v);
-    }
-    js_gc_unprotect(vm, &ns);
-    free(root_u);
-    js_vm_free(vm);
+/* ---- harness ---- */
+
+typedef struct {
+    JsVm *vm;
+    JsContext *ctx;
+    CountAlloc ca;
+} TestVm;
+
+static void tv_open(TestVm *tv, JsModuleCanonicalizer canon) {
+    tv->ca.net_bytes = 0;
+    tv->ca.live_allocs = 0;
+    JsVmConfig cfg = {.realloc_fn = count_realloc, .alloc_ud = &tv->ca};
+    tv->vm = js_vm_new(&cfg);
+    tv->ctx = js_context_new(tv->vm);
+    g_pending.count = 0;
+    js_set_module_loader(tv->ctx, loader, canon, tv->vm);
+}
+
+static void tv_close(TestVm *tv, const char *label) {
+    js_vm_free(tv->vm);
     checks_run++;
-    if (ca.net_bytes != 0 || ca.live_allocs != 0) {
+    if (tv->ca.net_bytes != 0 || tv->ca.live_allocs != 0) {
         checks_failed++;
-        fprintf(stderr, "FAIL leak (net=%ld allocs=%ld)\n", ca.net_bytes, ca.live_allocs);
+        fprintf(stderr, "FAIL leak: %s (net=%ld allocs=%ld)\n", label, tv->ca.net_bytes,
+                tv->ca.live_allocs);
     }
+}
+
+static char *value_to_cstr(JsContext *ctx, JsValue v) {
+    JsValue s = js_to_string(ctx, v);
+    size_t sl;
+    const uint16_t *su = js_string_units(s, &sl);
+    char *out = malloc(sl + 1);
+    for (size_t i = 0; i < sl; i++)
+        out[i] = su && su[i] < 128 ? (char)su[i] : '?';
+    out[sl] = 0;
     return out;
+}
+
+/* Reads export `exp` off namespace `ns` as a C string. */
+static char *export_to_cstr(JsContext *ctx, JsVm *vm, JsValue ns, const char *exp) {
+    size_t elen;
+    uint16_t *eu = to_u16(exp, &elen);
+    JsValue v = js_module_get_export(ctx, ns, eu, elen);
+    free(eu);
+    js_gc_protect(vm, &v);
+    char *out = value_to_cstr(ctx, v);
+    js_gc_unprotect(vm, &v);
+    return out;
+}
+
+/* Evaluates root `spec`, settling every deferred load; returns the export's
+ * (or rejection reason's) ToString, with *ok = fulfilled. */
+static char *eval_export_spec(const char *spec, const char *exp, bool *ok) {
+    TestVm tv;
+    tv_open(&tv, NULL);
+    size_t slen;
+    uint16_t *su = to_u16(spec, &slen);
+    JsValue p = js_eval_module(tv.ctx, su, slen);
+    free(su);
+    js_gc_protect(tv.vm, &p);
+    settle_all_loads(tv.ctx);
+    int st = js_promise_state(p);
+    *ok = st == 1;
+    char *out;
+    if (st == 1)
+        out = export_to_cstr(tv.ctx, tv.vm, js_promise_result(p), exp);
+    else
+        out = value_to_cstr(tv.ctx, js_promise_result(p));
+    js_gc_unprotect(tv.vm, &p);
+    tv_close(&tv, spec);
+    return out;
+}
+
+static char *eval_export(const char *root_src, const char *exp, bool *ok) {
+    (void)root_src; /* already in the table as 'main' */
+    return eval_export_spec("main", exp, ok);
 }
 
 /* Adds `main` = root_src, evaluates, asserts export `exp` == expected. */
@@ -164,6 +345,16 @@ static void eq_export(const char *root_src, const char *exp, const char *expecte
     mods_reset();
 }
 
+static void check(bool cond, const char *what) {
+    checks_run++;
+    if (!cond) {
+        checks_failed++;
+        fprintf(stderr, "FAIL %s\n", what);
+    }
+}
+
+/* ---- original behavioral suite (sync-shaped loads) ---- */
+
 static void test_basic_exports(void) {
     eq_export("export const x = 42;", "x", "42");
     eq_export("export let y = 1; y = y + 9;", "y", "10");
@@ -178,21 +369,17 @@ static void test_basic_exports(void) {
 static void test_imports(void) {
     mod_add("helpers", "export const PI = 3; export function double(x) { return x * 2; }");
     eq_export("import { PI, double } from 'helpers'; export const r = double(PI);", "r", "6");
-    mods_reset();
 
     mod_add("m", "export const value = 'hello';");
     eq_export("import { value as v } from 'm'; export const out = v + ' world';", "out",
               "hello world");
-    mods_reset();
 
     mod_add("lib", "export default function greet(n) { return 'Hi ' + n; }");
     eq_export("import greet from 'lib'; export const msg = greet('Al');", "msg", "Hi Al");
-    mods_reset();
 
     mod_add("ns", "export const a = 1; export const b = 2; export const c = 3;");
     eq_export("import * as all from 'ns'; export const sum = all.a + all.b + all.c;", "sum",
               "6");
-    mods_reset();
 }
 
 static void test_live_bindings(void) {
@@ -203,14 +390,12 @@ static void test_live_bindings(void) {
               "inc(); inc(); inc();"
               "export const result = n;",
               "result", "3");
-    mods_reset();
 }
 
 static void test_transitive(void) {
     mod_add("a", "export const A = 10;");
     mod_add("b", "import { A } from 'a'; export const B = A + 5;");
     eq_export("import { B } from 'b'; export const C = B * 2;", "C", "30");
-    mods_reset();
 }
 
 static void test_diamond(void) {
@@ -221,7 +406,6 @@ static void test_diamond(void) {
     eq_export("import { l } from 'left'; import { r } from 'right';"
               "export const total = l + r;",
               "total", "3"); /* tick() called once each: 1 + 2 */
-    mods_reset();
 }
 
 static void test_cycle(void) {
@@ -235,14 +419,12 @@ static void test_cycle(void) {
     eq_export("import { isEven } from 'evenmod';"
               "export const r = isEven(10);",
               "r", "true");
-    mods_reset();
 }
 
 static void test_star_reexport(void) {
     mod_add("inner", "export const a = 1; export const b = 2;");
     mod_add("mid", "export * from 'inner'; export const c = 3;");
     eq_export("import * as m from 'mid'; export const sum = m.a + m.b + m.c;", "sum", "6");
-    mods_reset();
 }
 
 static void test_reexport_named(void) {
@@ -254,15 +436,13 @@ static void test_reexport_named(void) {
     eq_export("import { circle, box } from 'index';"
               "export const out = circle() + box();",
               "out", "O[]");
-    mods_reset();
 
     /* the re-exported name appears on the namespace too */
-    mod_add("lib", "export const VERSION = '1.0'; export const NAME = 'jsvm';");
+    mod_add("lib", "export const VERSION = '1.0'; export const NAME = 'lamassu';");
     mod_add("barrel", "export { VERSION } from 'lib'; export { NAME as title } from 'lib';");
     eq_export("import * as b from 'barrel';"
               "export const info = b.title + ' ' + b.VERSION;",
-              "info", "jsvm 1.0");
-    mods_reset();
+              "info", "lamassu 1.0");
 }
 
 static void test_reexport_ns(void) {
@@ -272,7 +452,6 @@ static void test_reexport_ns(void) {
     eq_export("import { m, own } from 'facade';"
               "export const out = m.pi + '/' + m.sq(4) + '/' + own;",
               "out", "3.14/16/true");
-    mods_reset();
 }
 
 static void test_barrel(void) {
@@ -287,7 +466,6 @@ static void test_barrel(void) {
     eq_export("import { money, year, shout } from 'utils';"
               "export const line = shout('total') + ': ' + money(9.5) + ' (' + year() + ')';",
               "line", "TOTAL: $9.50 (2026)");
-    mods_reset();
 }
 
 static void test_async_module(void) {
@@ -296,24 +474,26 @@ static void test_async_module(void) {
               "export let result = 0;"
               "load().then(v => result = v);",
               "result", "42"); /* microtasks drained during evaluation */
-    mods_reset();
     /* top-level await in a module */
     eq_export("export const value = await Promise.resolve('ready');", "value", "ready");
 }
 
 static void test_errors(void) {
     mods_reset();
+    mod_add("main", "import { x } from 'missing';");
     bool ok;
-    char *out = eval_export("import { x } from 'missing';", "x", &ok);
+    char *out = eval_export_spec("main", "x", &ok);
     checks_run++;
     if (ok || !strstr(out, "not found")) {
         checks_failed++;
         fprintf(stderr, "FAIL expected 'not found', got: %s\n", out);
     }
     free(out);
+    mods_reset();
 
+    mod_add("main", "import { y } from 'bad';");
     mod_add("bad", "this is not valid js @#$");
-    out = eval_export("import { y } from 'bad';", "y", &ok);
+    out = eval_export_spec("main", "y", &ok);
     checks_run++;
     if (ok) {
         checks_failed++;
@@ -323,13 +503,267 @@ static void test_errors(void) {
     mods_reset();
 
     /* runtime error during module evaluation propagates */
-    out = eval_export("throw 'module boom';", "x", &ok);
+    mod_add("main", "throw 'module boom';");
+    out = eval_export_spec("main", "x", &ok);
     checks_run++;
     if (ok || !strstr(out, "boom")) {
         checks_failed++;
         fprintf(stderr, "FAIL expected 'boom', got: %s\n", out);
     }
     free(out);
+    mods_reset();
+}
+
+/* ---- async-specific suite ---- */
+
+/*
+ * Diamond whose branches load on different host turns. Between rounds the
+ * job queue must be empty — a same-drain false positive can't pass this.
+ */
+static void test_cross_turn_rounds(void) {
+    mod_add("shared", "export let hits = 0; export function hit() { hits = hits + 1; return hits; }");
+    mod_add_mode("left", "import { hit } from 'shared'; export const l = hit();", MODE_DEFERRED);
+    mod_add_mode("right", "import { hit } from 'shared'; export const r = hit();", MODE_DEFERRED);
+    mod_add("main", "import { l } from 'left'; import { r } from 'right';"
+                    "export const total = l * 10 + r;");
+    TestVm tv;
+    tv_open(&tv, NULL);
+    static const uint16_t spec[] = {'m', 'a', 'i', 'n'};
+    JsValue p = js_eval_module(tv.ctx, spec, 4);
+    js_gc_protect(tv.vm, &p);
+
+    check(js_promise_state(p) == 0 && g_pending.count == 2 && !js_has_pending_jobs(tv.ctx),
+          "cross-turn: pending with a quiescent job queue, two loads outstanding");
+
+    settle_load(tv.ctx, "left"); /* round 1 */
+    check(js_promise_state(p) == 0 && !js_has_pending_jobs(tv.ctx),
+          "cross-turn: still pending after round 1, queue quiescent again");
+
+    settle_load(tv.ctx, "right"); /* round 2 */
+    check(js_promise_state(p) == 1, "cross-turn: fulfilled after final round");
+    if (js_promise_state(p) == 1) {
+        char *out = export_to_cstr(tv.ctx, tv.vm, js_promise_result(p), "total");
+        check(strcmp(out, "12") == 0, "cross-turn: exports correct (12)");
+        free(out);
+    }
+    js_gc_unprotect(tv.vm, &p);
+    tv_close(&tv, "cross-turn");
+    mods_reset();
+}
+
+/* Synthetic module: the loader resolves with a plain object adopted as the
+ * exports. Its table "source" is invalid JS — proving it is never parsed. */
+static void test_synthetic(void) {
+    mod_add_mode("styles.css", ".card { color: red } /* not js! @# */", MODE_SYNTHETIC);
+    mod_add("main", "import css from 'styles.css';"
+                    "import { color } from 'styles.css';"
+                    "export const out = css + '/' + color;");
+    bool ok;
+    char *out = eval_export_spec("main", "out", &ok);
+    check(ok && strcmp(out, "cls-styles.css/red") == 0, "synthetic exports adopted");
+    free(out);
+    mods_reset();
+}
+
+/* One graph mixing all three fulfillment types. */
+static void test_mixed_graph(void) {
+    TestVm tv;
+    tv_open(&tv, NULL);
+    /* precompile 'bcmod' to bytecode in this context */
+    size_t blen;
+    uint16_t *bu = to_u16("export const b = 20;", &blen);
+    static const uint16_t bspec[] = {'b', 'c', 'm', 'o', 'd'};
+    uint8_t *buf;
+    size_t buf_len;
+    const char *em;
+    uint32_t ep;
+    bool cok = js_bytecode_compile_module(tv.ctx, bspec, 5, bu, blen, &buf, &buf_len, &em, &ep);
+    free(bu);
+    check(cok, "mixed: bytecode compile");
+    int bi = mod_add_mode("bcmod", NULL, MODE_BYTECODE);
+    g_mods.bytecode[bi] = malloc(buf_len);
+    memcpy(g_mods.bytecode[bi], buf, buf_len);
+    g_mods.bytecode_lens[bi] = buf_len;
+    js_bytecode_free(tv.ctx, buf, buf_len);
+
+    mod_add("srcmod", "export const s = 1;");
+    mod_add_mode("theme.css", "not js either {", MODE_SYNTHETIC);
+    mod_add("main", "import { s } from 'srcmod';"
+                    "import { b } from 'bcmod';"
+                    "import { color } from 'theme.css';"
+                    "export const out = s + b + '-' + color;");
+
+    static const uint16_t spec[] = {'m', 'a', 'i', 'n'};
+    JsValue p = js_eval_module(tv.ctx, spec, 4);
+    js_gc_protect(tv.vm, &p);
+    char *out = js_promise_state(p) == 1
+                    ? export_to_cstr(tv.ctx, tv.vm, js_promise_result(p), "out")
+                    : value_to_cstr(tv.ctx, js_promise_result(p));
+    check(js_promise_state(p) == 1 && strcmp(out, "21-red") == 0,
+          "mixed source/bytecode/synthetic graph");
+    free(out);
+    js_gc_unprotect(tv.vm, &p);
+    tv_close(&tv, "mixed graph");
+    mods_reset();
+}
+
+/* Diamond dedup: one loader invocation per specifier, even when both
+ * importers' loads are deferred and settle on different turns. */
+static void test_load_dedup(void) {
+    mod_add("shared", "export const x = 1;");
+    mod_add_mode("l", "import { x } from 'shared'; export const a = x;", MODE_DEFERRED);
+    mod_add_mode("r", "import { x } from 'shared'; export const b = x;", MODE_DEFERRED);
+    mod_add("main", "import { a } from 'l'; import { b } from 'r'; export const s = a + b;");
+    TestVm tv;
+    tv_open(&tv, NULL);
+    static const uint16_t spec[] = {'m', 'a', 'i', 'n'};
+    JsValue p = js_eval_module(tv.ctx, spec, 4);
+    js_gc_protect(tv.vm, &p);
+    settle_load(tv.ctx, "l");
+    settle_load(tv.ctx, "r");
+    check(js_promise_state(p) == 1, "dedup: graph completed");
+    check(g_mods.loads[mod_find("shared")] == 1, "dedup: shared loaded exactly once");
+    js_gc_unprotect(tv.vm, &p);
+    tv_close(&tv, "dedup");
+    mods_reset();
+}
+
+/* A deep dependency's load rejects: the root completion must reject with
+ * that exact reason. */
+static void test_reject_propagation(void) {
+    mod_add("mid", "import { d } from 'deep'; export const m = d;");
+    mod_add_mode("deep", "export const d = 1;", MODE_DEFERRED);
+    mod_add("main", "import { m } from 'mid'; export const out = m;");
+    TestVm tv;
+    tv_open(&tv, NULL);
+    static const uint16_t spec[] = {'m', 'a', 'i', 'n'};
+    JsValue p = js_eval_module(tv.ctx, spec, 4);
+    js_gc_protect(tv.vm, &p);
+    check(js_promise_state(p) == 0, "reject-prop: pending before settle");
+    /* reject deep's load */
+    g_pending.reject[0] = true;
+    g_pending.reject_msg[0] = "fetch failed: 404";
+    settle_load(tv.ctx, "deep");
+    char *out = value_to_cstr(tv.ctx, js_promise_result(p));
+    check(js_promise_state(p) == 2 && strcmp(out, "fetch failed: 404") == 0,
+          "reject-prop: root rejects with the loader's exact reason");
+    free(out);
+    js_gc_unprotect(tv.vm, &p);
+    tv_close(&tv, "reject propagation");
+    mods_reset();
+}
+
+static void test_canonicalization(void) {
+    /* convergent: sibling files' './a.js' resolve to the same module */
+    mod_add("dir/main.js", "import { tag } from './a.js'; export const m1 = tag;");
+    mod_add("dir/other.js", "import { tag } from './a.js'; export const m2 = tag;");
+    mod_add("dir/a.js", "export let n = 0; n = n + 1; export const tag = 'a' + n;");
+    mod_add("main", "import { m1 } from 'dir/main.js'; import { m2 } from 'dir/other.js';"
+                    "export const out = m1 + '/' + m2;");
+    TestVm tv;
+    tv_open(&tv, canonicalize);
+    static const uint16_t spec[] = {'m', 'a', 'i', 'n'};
+    JsValue p = js_eval_module(tv.ctx, spec, 4);
+    js_gc_protect(tv.vm, &p);
+    char *out = js_promise_state(p) == 1
+                    ? export_to_cstr(tv.ctx, tv.vm, js_promise_result(p), "out")
+                    : value_to_cstr(tv.ctx, js_promise_result(p));
+    check(js_promise_state(p) == 1 && strcmp(out, "a1/a1") == 0,
+          "canon convergent: one shared dir/a.js");
+    check(g_mods.loads[mod_find("dir/a.js")] == 1,
+          "canon convergent: loader fired once for dir/a.js");
+    free(out);
+    js_gc_unprotect(tv.vm, &p);
+    tv_close(&tv, "canon convergent");
+    mods_reset();
+
+    /* divergent: the same raw './util.js' from different directories is two
+     * distinct modules */
+    mod_add("x/main.js", "import { u } from './util.js'; export const xu = u;");
+    mod_add("y/main.js", "import { u } from './util.js'; export const yu = u;");
+    mod_add("x/util.js", "export const u = 'X';");
+    mod_add("y/util.js", "export const u = 'Y';");
+    mod_add("main", "import { xu } from 'x/main.js'; import { yu } from 'y/main.js';"
+                    "export const out = xu + yu;");
+    tv_open(&tv, canonicalize);
+    JsValue p2 = js_eval_module(tv.ctx, spec, 4);
+    js_gc_protect(tv.vm, &p2);
+    out = js_promise_state(p2) == 1
+              ? export_to_cstr(tv.ctx, tv.vm, js_promise_result(p2), "out")
+              : value_to_cstr(tv.ctx, js_promise_result(p2));
+    check(js_promise_state(p2) == 1 && strcmp(out, "XY") == 0,
+          "canon divergent: distinct modules, no false sharing");
+    check(g_mods.loads[mod_find("x/util.js")] == 1 && g_mods.loads[mod_find("y/util.js")] == 1,
+          "canon divergent: each util loaded once");
+    free(out);
+    js_gc_unprotect(tv.vm, &p2);
+    tv_close(&tv, "canon divergent");
+    mods_reset();
+
+    /* failure: canonicalizer refuses the specifier */
+    mod_add("main", "import { z } from '@bad'; export const out = z;");
+    tv_open(&tv, canonicalize);
+    JsValue p3 = js_eval_module(tv.ctx, spec, 4);
+    js_gc_protect(tv.vm, &p3);
+    out = value_to_cstr(tv.ctx, js_promise_result(p3));
+    check(js_promise_state(p3) == 2 && strstr(out, "cannot resolve module specifier") != NULL,
+          "canon failure: rejection with resolve error");
+    free(out);
+    js_gc_unprotect(tv.vm, &p3);
+    tv_close(&tv, "canon failure");
+    mods_reset();
+}
+
+/* ---- TLA body awaiting a host promise inside a dependency ---- */
+
+static JsValue g_defer_promise;
+static JsValue g_defer_value;
+static int g_defer_count;
+
+static bool native_defer(JsContext *ctx, JsValue this_val, const JsValue *args,
+                         int argc, JsValue *result) {
+    (void)this_val;
+    JsValue p = js_promise_new(ctx);
+    g_defer_promise = p;
+    g_defer_value = argc > 0 ? args[0] : js_undefined();
+    g_defer_count++;
+    *result = p;
+    return true;
+}
+
+static void test_tla_dep_cross_turn(void) {
+    mod_add("slow", "export const v = await defer('late');");
+    mod_add("main", "import { v } from 'slow'; export const out = v + '!';");
+    TestVm tv;
+    tv_open(&tv, NULL);
+    static const uint16_t n_defer[] = {'d', 'e', 'f', 'e', 'r'};
+    js_register_native(tv.ctx, n_defer, 5, native_defer, NULL);
+    g_defer_count = 0;
+
+    static const uint16_t spec[] = {'m', 'a', 'i', 'n'};
+    JsValue p = js_eval_module(tv.ctx, spec, 4);
+    js_gc_protect(tv.vm, &p);
+    js_gc_protect(tv.vm, &g_defer_promise);
+    js_gc_protect(tv.vm, &g_defer_value);
+
+    check(js_promise_state(p) == 0 && g_defer_count == 1 && !js_has_pending_jobs(tv.ctx),
+          "tla-dep: root pending while a dependency body awaits the host");
+
+    /* a full GC in the gap must not lose the suspended evaluation */
+    js_gc_collect(tv.vm);
+    js_resolve(tv.ctx, g_defer_promise, g_defer_value);
+    js_run_jobs(tv.ctx);
+
+    check(js_promise_state(p) == 1, "tla-dep: fulfilled after the host settles");
+    if (js_promise_state(p) == 1) {
+        char *out = export_to_cstr(tv.ctx, tv.vm, js_promise_result(p), "out");
+        check(strcmp(out, "late!") == 0, "tla-dep: export observed the awaited value");
+        free(out);
+    }
+    js_gc_unprotect(tv.vm, &g_defer_value);
+    js_gc_unprotect(tv.vm, &g_defer_promise);
+    js_gc_unprotect(tv.vm, &p);
+    tv_close(&tv, "tla dependency");
     mods_reset();
 }
 
@@ -346,6 +780,13 @@ int main(void) {
     test_barrel();
     test_async_module();
     test_errors();
+    test_cross_turn_rounds();
+    test_synthetic();
+    test_mixed_graph();
+    test_load_dedup();
+    test_reject_propagation();
+    test_canonicalization();
+    test_tla_dep_cross_turn();
     mods_reset();
     if (checks_failed) {
         fprintf(stderr, "%d/%d module checks FAILED\n", checks_failed, checks_run);

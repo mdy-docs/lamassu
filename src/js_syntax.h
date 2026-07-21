@@ -119,7 +119,9 @@ typedef enum JsAstKind {
     JS_AST_ARRAY, JS_AST_OBJECT, JS_AST_PROPERTY,
     JS_AST_FUNC_EXPR, JS_AST_CALL, JS_AST_NEW, JS_AST_MEMBER,
     JS_AST_UNARY, JS_AST_UPDATE, JS_AST_BINARY, JS_AST_LOGICAL, JS_AST_COND,
-    JS_AST_ASSIGN, JS_AST_SEQUENCE, JS_AST_SPREAD, JS_AST_AWAIT, JS_AST_HOLE,
+    JS_AST_ASSIGN, JS_AST_SEQUENCE, JS_AST_SPREAD, JS_AST_AWAIT,
+    JS_AST_IMPORT_CALL, /* dynamic import(): a = specifier, b = options or NULL */
+    JS_AST_HOLE,
     JS_AST_COVER, /* transient: parenthesized list before arrow/expr decision */
     /* patterns */
     JS_AST_ARRAY_PATTERN, JS_AST_OBJECT_PATTERN, JS_AST_REST, JS_AST_DEFAULT,

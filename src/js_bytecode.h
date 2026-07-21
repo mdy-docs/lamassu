@@ -84,12 +84,15 @@ typedef enum JsOp {
     JS_OP_SET_EXPORT,      /* u16 name; peeks; module.exports[name] = value */
     JS_OP_GET_IMPORT,      /* u16 import idx -> push source.exports[importedName] */
     JS_OP_IMPORT_NS,       /* u16 import idx -> push source's namespace object */
-    /* phase 10: regex (JSVM_HAS_REGEX builds; literals are rejected at
+    /* phase 10: regex (LAMASSU_HAS_REGEX builds; literals are rejected at
      * compile time elsewhere, so the opcode never reaches other builds) */
     JS_OP_NEW_REGEXP,      /* u16 source const, u16 flags const -> push regexp */
+    /* phase 11: dynamic import() — legal in modules AND plain scripts
+     * (fn->module NULL = empty referrer), so NOT a module-gated opcode */
+    JS_OP_DYNAMIC_IMPORT,  /* pops specifier, pushes the load's promise */
 } JsOp;
 
-#define JS_OP__COUNT (JS_OP_NEW_REGEXP + 1)
+#define JS_OP__COUNT (JS_OP_DYNAMIC_IMPORT + 1)
 
 /*
  * Per-opcode metadata, the single source of truth the bytecode verifier
@@ -243,15 +246,25 @@ int js_bytecode_peek_kind(const uint8_t *buf, size_t len);
 bool js_bc_serialize_module(JsContext *ctx, JsModule *m, uint8_t **out, size_t *out_len);
 
 /*
- * Loads + fully validates a module bytecode buffer into a fresh unlinked
- * JsModule (body wired, every nested fn->module set, import indices verified),
- * using `canon_spec` as the module's identity. The module is NOT registered;
- * the caller (js_module.c) registers it. Returns NULL with *err set on any
- * structural problem. The returned cell is reachable only via the caller's
- * protected slot — root it immediately.
+ * Loads + fully validates a module bytecode buffer into the caller-provided
+ * module cell (body wired, every nested fn->module set, import indices
+ * verified) — `m` is typically a registered FETCHING placeholder, which
+ * keeps everything rooted during the load. Only the compile-time fields
+ * (imports/stars/dep_specs/exports/body) are touched; specifier and status
+ * stay the caller's. Returns false with *err set on any structural problem,
+ * leaving any partial fill to the GC.
  */
-JsModule *js_bc_load_module(JsContext *ctx, const uint8_t *buf, size_t len,
-                            JsString *canon_spec, const char **err);
+bool js_bc_load_module(JsContext *ctx, JsModule *m, const uint8_t *buf, size_t len,
+                       const char **err);
+
+/*
+ * Dynamic import(): ToStrings `spec`, canonicalizes it against `referrer`
+ * (NULL = plain script, empty referrer), and starts/joins the module load.
+ * Always returns a promise (errors become rejections, matching real
+ * import()'s never-throws-synchronously contract); undefined only on OOM.
+ * Does NOT drain jobs — the interpreter is mid-fiber when this runs.
+ */
+JsValue js_module_dynamic_import(JsContext *ctx, JsModule *referrer, JsValue spec);
 
 /* Creates a native function cell (not registered anywhere); undefined on OOM. */
 JsValue js_native_new(JsContext *ctx, const char *name, JsNativeFn fn, void *ud);

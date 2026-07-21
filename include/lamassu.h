@@ -173,15 +173,21 @@ JsValue js_compile_module_repl(JsContext *ctx, const uint16_t *src, size_t len,
                                const char **err_msg, uint32_t *err_pos);
 
 /*
- * Runs a compiled module function. Returns true with *result = completion
- * value (the value of the last expression statement), or false with
- * *result = the error value; js_context_error_pos() gives its source offset.
+ * Runs a compiled module function and returns its completion promise:
+ * fulfilled with the completion value (the value of the last expression
+ * statement), rejected with the thrown error (js_context_error_pos() gives
+ * its source offset), or still pending when top-level await suspended on a
+ * promise the host hasn't settled yet. In that last case, protect the
+ * returned promise, settle the host promises it is waiting on, and call
+ * js_run_jobs(); observe completion with js_promise_state /
+ * js_promise_result. Returns undefined on OOM or if fn is not a function.
  */
-bool js_run_module(JsContext *ctx, JsValue fn, JsValue *result);
+JsValue js_run_module(JsContext *ctx, JsValue fn);
 
 /*
  * Calls a function value (script closure or native) on a fresh fiber.
- * Same result contract as js_run_module.
+ * Returns true with *result = the return value, or false with *result =
+ * the error value.
  */
 bool js_call(JsContext *ctx, JsValue fn, JsValue this_val, const JsValue *args,
              int argc, JsValue *result);
@@ -214,34 +220,63 @@ bool    js_reject(JsContext *ctx, JsValue promise, JsValue reason);
 void js_run_jobs(JsContext *ctx);
 bool js_has_pending_jobs(const JsContext *ctx);
 
+/* Promise introspection: -1 = not a promise, 0 = pending, 1 = fulfilled,
+ * 2 = rejected. */
+int js_promise_state(JsValue v);
+/* Fulfillment value or rejection reason; undefined if pending or not a promise. */
+JsValue js_promise_result(JsValue v);
+
 /* ---- ES modules (phase 7) ---- */
 
 /*
- * Host module resolver. Given an import `specifier` and the `referrer`
- * (importing module's specifier, empty for the root), return the resolved
- * module's source. Write a canonical specifier to *out_specifier (used as
- * the cache/identity key; may equal the input) and the UTF-16 source to
- * *out_source / *out_len. Return true on success, false if not found.
+ * Host module loader. Given an import `specifier` (canonical — see the
+ * canonicalizer below) and the `referrer` (importing module's specifier,
+ * empty for the root or a dynamic import() from plain script), return a
+ * Promise (pending or already settled). Fulfill it with:
+ *   - a JS string        -> ES module source (compiled; its own imports are
+ *                           loaded through this same loader), or
+ *   - a bytecode value   -> precompiled module bytecode (js_bytecode_value), or
+ *   - any other object   -> adopted directly as the module's exports (a
+ *                           synthetic leaf module — no parse, no deps).
+ * Reject it to fail the load; the reason propagates to every dependent.
  *
- * The returned buffers must stay valid until the call returns (the engine
- * copies what it needs). Specifiers are compared by content for caching.
+ * For real async work, return js_promise_new() and settle it later with
+ * js_resolve/js_reject followed by js_run_jobs() (the standard two-phase
+ * pattern above) — or delegate to a JS-authored loader via js_call and
+ * return whatever promise it produces.
  */
-typedef bool (*JsModuleResolver)(void *ud, const uint16_t *specifier, size_t spec_len,
-                                 const uint16_t *referrer, size_t ref_len,
-                                 const uint16_t **out_specifier, size_t *out_spec_len,
-                                 const uint16_t **out_source, size_t *out_len);
-
-void js_set_module_resolver(JsContext *ctx, JsModuleResolver fn, void *ud);
+typedef JsValue (*JsModuleLoader)(void *ud, JsContext *ctx,
+                                  const uint16_t *specifier, size_t spec_len,
+                                  const uint16_t *referrer, size_t ref_len);
 
 /*
- * Compiles, links, and evaluates a root module (its dependencies are pulled
- * in through the resolver). Returns the module's namespace (exports) object
- * on success, or undefined with err_msg/err_pos set on a compile/link
- * error, or the thrown value with return-false semantics via ok.
+ * Optional synchronous specifier canonicalization, run before dedupe/fetch:
+ * maps a raw import specifier + referrer to the canonical specifier that
+ * becomes the module's registry identity (e.g. relative path -> absolute
+ * URL). Must be deterministic for a given (specifier, referrer) pair. Write
+ * the result to *out_specifier / *out_spec_len (valid until the call
+ * returns; the engine copies). Return false to fail the load ("cannot
+ * resolve module specifier"). A NULL canonicalizer means the raw specifier
+ * is the identity.
  */
-JsValue js_eval_module(JsContext *ctx, const uint16_t *specifier, size_t spec_len,
-                       const uint16_t *source, size_t source_len, bool *ok,
-                       const char **err_msg, uint32_t *err_pos);
+typedef bool (*JsModuleCanonicalizer)(void *ud, const uint16_t *specifier, size_t spec_len,
+                                      const uint16_t *referrer, size_t ref_len,
+                                      const uint16_t **out_specifier, size_t *out_spec_len);
+
+/* One userdata serves both callbacks; canon may be NULL. */
+void js_set_module_loader(JsContext *ctx, JsModuleLoader load,
+                          JsModuleCanonicalizer canon, void *ud);
+
+/*
+ * Loads, links, and evaluates the module graph rooted at `specifier`
+ * (everything, the root included, arrives through the loader). Always
+ * returns a live Promise — protect it, drive outstanding loads with
+ * js_resolve/js_reject + js_run_jobs(), and observe completion with
+ * js_promise_state / js_promise_result. Fulfills with the module's
+ * namespace (exports) object; rejects with the load/compile/link/evaluate
+ * error. Returns undefined only on OOM.
+ */
+JsValue js_eval_module(JsContext *ctx, const uint16_t *specifier, size_t spec_len);
 
 /* Reads a named export from a module namespace object (host convenience). */
 JsValue js_module_get_export(JsContext *ctx, JsValue ns, const uint16_t *name,
@@ -294,8 +329,8 @@ JsValue js_bytecode_load(JsContext *ctx, const uint8_t *buf, size_t len,
  * parse/compile error returns false with *err_msg / *err_pos set.
  *
  * A module buffer is distinct from a script buffer (js_bytecode_serialize):
- * js_bytecode_load rejects a module buffer and js_eval_module_bytecode rejects
- * a script buffer, so the two can't be confused.
+ * js_bytecode_load rejects a module buffer and the module loader rejects a
+ * script buffer, so the two can't be confused.
  */
 bool js_bytecode_compile_module(JsContext *ctx, const uint16_t *specifier,
                                 size_t spec_len, const uint16_t *source,
@@ -303,39 +338,21 @@ bool js_bytecode_compile_module(JsContext *ctx, const uint16_t *specifier,
                                 const char **err_msg, uint32_t *err_pos);
 
 /*
- * Host bytecode resolver — the module-bytecode analogue of JsModuleResolver:
- * given an import `specifier` and its `referrer`, return the dependency
- * module's compiled bytecode (not source). Write a canonical specifier to
- * *out_specifier (the cache/identity key) and the buffer to *out_bytecode /
- * *out_len. Return true on success, false if not found. Buffers must stay
- * valid until the call returns (the engine copies what it needs).
+ * Wraps a js_bytecode_compile_module buffer in an opaque GC-managed value
+ * (the bytes are copied) for a module loader to fulfill its promise with.
+ * Every loaded module buffer is fully validated (including import-index
+ * bounds the interpreter trusts), so a tampered cache cannot become
+ * undefined behavior. Returns undefined on OOM.
  */
-typedef bool (*JsBytecodeResolver)(void *ud, const uint16_t *specifier, size_t spec_len,
-                                   const uint16_t *referrer, size_t ref_len,
-                                   const uint16_t **out_specifier, size_t *out_spec_len,
-                                   const uint8_t **out_bytecode, size_t *out_len);
-
-void js_set_bytecode_resolver(JsContext *ctx, JsBytecodeResolver fn, void *ud);
+JsValue js_bytecode_value(JsContext *ctx, const uint8_t *buf, size_t len);
 
 /*
  * Reports what a bytecode buffer holds without loading it: 0 = a script
- * (js_bytecode_load / js_run_module), 1 = a module (js_eval_module_bytecode),
- * negative = not valid bytecode. Lets a host dispatch a `.jsbc` file correctly.
+ * (js_bytecode_load / js_run_module), 1 = a module (js_bytecode_value via
+ * the module loader), negative = not valid bytecode. Lets a host dispatch a
+ * `.jsbc` file correctly.
  */
 int js_bytecode_kind(const uint8_t *buf, size_t len);
-
-/*
- * Loads, validates, links, and evaluates a root module from bytecode, pulling
- * its dependencies in through the bytecode resolver (set it first, unless the
- * root has no imports). Same result contract as js_eval_module: the namespace
- * object on success, or undefined with err_msg/err_pos on a load/link error,
- * or the thrown value with *ok = false. Every loaded module buffer is fully
- * validated (including import-index bounds the interpreter trusts), so a
- * tampered module cache cannot become undefined behavior.
- */
-JsValue js_eval_module_bytecode(JsContext *ctx, const uint16_t *specifier,
-                                size_t spec_len, const uint8_t *bytecode, size_t len,
-                                bool *ok, const char **err_msg, uint32_t *err_pos);
 
 /* ---- GC ---- */
 

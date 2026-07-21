@@ -1,7 +1,7 @@
 #include "js_syntax.h"
 
 /*
- * Recursive-descent / Pratt parser for the jsvm subset: always strict,
+ * Recursive-descent / Pratt parser for the lamassu subset: always strict,
  * always module goal, no var/class/eval/new. Parenthesized expressions and
  * arrow parameter lists share a cover grammar (JS_AST_COVER) resolved when
  * `=>` is (or isn't) seen. Nesting depth is hard-limited so hostile input
@@ -39,6 +39,7 @@ static JsAstNode *parse_block(JsParser *p);
 static JsAstNode *parse_expression(JsParser *p);
 static JsAstNode *parse_new_expr(JsParser *p);
 static JsAstNode *parse_assign(JsParser *p);
+static JsAstNode *parse_arguments(JsParser *p, JsNodeVec *out);
 static JsAstNode *parse_binding_target(JsParser *p);
 static JsAstNode *parse_binding_element(JsParser *p);
 static JsAstNode *parse_func_common(JsParser *p, uint8_t flags, bool need_name,
@@ -1025,11 +1026,29 @@ static JsAstNode *parse_primary(JsParser *p) {
         return perr_here(p, "'new' is not supported here");
     case JS_T_IMPORT: {
         JsToken nx = peek(p);
-        if (nx.kind == JS_T_LPAREN)
-            return perr_here(p, "dynamic import() is not supported");
         if (nx.kind == JS_T_DOT)
             return perr_here(p, "import.meta is not supported");
-        return perr_here(p, "'import' is only allowed at the top level of a module");
+        if (nx.kind != JS_T_LPAREN)
+            return perr_here(p, "'import' is only allowed at the top level of a module");
+        /* dynamic import(specifier[, options]) — options is evaluated then
+         * ignored (import attributes are not supported) */
+        uint32_t pos = t->pos;
+        if (!advance(p)) /* consume 'import'; TOK is now '(' */
+            return NULL;
+        JsNodeVec args = {0};
+        if (!parse_arguments(p, &args))
+            return NULL;
+        if (args.count < 1 || args.count > 2)
+            return perr(p, pos, "import() takes 1 or 2 arguments");
+        if (args.items[0]->kind == JS_AST_SPREAD ||
+            (args.count == 2 && args.items[1]->kind == JS_AST_SPREAD))
+            return perr(p, pos, "spread is not allowed in import()");
+        JsAstNode *node = new_node(p, JS_AST_IMPORT_CALL, pos);
+        if (!node)
+            return NULL;
+        node->a = args.items[0];
+        node->b = args.count == 2 ? args.items[1] : NULL;
+        return node;
     }
     default:
         return perr_here(p, "expected expression");
@@ -1970,7 +1989,22 @@ static JsAstNode *parse_statement(JsParser *p) {
             break;
         result = parse_func_common(p, 0, true, pos, JS_AST_FUNC_DECL);
         break;
-    case JS_T_IMPORT:
+    case JS_T_IMPORT: {
+        JsToken nx = peek(p);
+        if (nx.kind == JS_T_LPAREN || nx.kind == JS_T_DOT) {
+            /* dynamic import() / import.meta: expression position (the
+             * expression parser rejects import.meta with its own error) */
+            JsAstNode *e = parse_expression(p);
+            if (!e || !expect_semicolon(p))
+                break;
+            result = new_node(p, JS_AST_EXPR_STMT, pos);
+            if (result)
+                result->a = e;
+            break;
+        }
+        result = perr(p, pos, "import/export is only allowed at the top level of a module");
+        break;
+    }
     case JS_T_EXPORT:
         result = perr(p, pos, "import/export is only allowed at the top level of a module");
         break;
@@ -2035,7 +2069,16 @@ static JsAstNode *parse_module_source(JsParser *p, JsAstNode *n) {
         return perr_here(p, "expected module specifier string");
     n->units = TOK(p).u.str.units;
     n->len = TOK(p).u.str.len;
-    if (!advance(p) || !expect_semicolon(p))
+    if (!advance(p))
+        return NULL;
+    /* an attribute clause after the specifier gets a dedicated error, not
+     * the generic expected-';' fallthrough */
+    JsToken *t = &TOK(p);
+    if (((t->kind == JS_T_RESERVED && units_is(t->u.str.units, t->u.str.len, "with")) ||
+         tok_is_name(t, "assert")) &&
+        peek(p).kind == JS_T_LBRACE)
+        return perr_here(p, "import attributes are not supported");
+    if (!expect_semicolon(p))
         return NULL;
     return n;
 }

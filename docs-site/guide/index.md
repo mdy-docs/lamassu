@@ -10,7 +10,7 @@ It ships as:
 
 - **[`@mdy-docs/lamassu-js`](/api/npm-package)** — an npm package exposing the
   engine as a WebAssembly ES module, for use in Node or the browser.
-- A native C library (`libjsvm`) and a command-line tool (`jsvm`), for
+- A native C library (`liblamassu`) and a command-line tool (`lamassu`), for
   embedders working directly in C — see the
   **[C embedding API](/api/c-embedding)**.
 - A [browser playground](https://mdy-docs.github.io/lamassu-js/) with a

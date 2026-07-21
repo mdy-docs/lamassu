@@ -1,4 +1,4 @@
-# jsvm — Implementation Plan
+# lamassu — Implementation Plan
 
 A simplified JavaScript virtual machine written in C, compiled to a WASM module,
 for safely executing untrusted user scripts inside a web-framework templating
@@ -19,7 +19,7 @@ language.
     `js_resolve`/`js_reject` + `js_run_jobs`. Exercised end-to-end in
     `test/test_async.c` as natively-compiled C, and now also as compiled
     WASM in Node: `wasm_api.c` exposes a test-only `__nativeDefer(id)`
-    native + `jsvm_settle_deferred(id, value)` export (settled from a real
+    native + `lamassu_settle_deferred(id, value)` export (settled from a real
     JS timer callback in `.github/scripts/smoke.mjs`, not through
     Asyncify) — closing the coverage gap that used to exist here.
   - **`__hostcall(name, argsJson)`** (`src/wasm_api.c`): a *synchronous-
@@ -32,7 +32,7 @@ language.
   stack depth.
 - Clean object-oriented C design: no static globals; all state hangs off
   explicit handles (`JsVm`, `JsContext`, …) passed as the first argument.
-- A native command-line tool (`jsvm`) that compiles and runs a JavaScript
+- A native command-line tool (`lamassu`) that compiles and runs a JavaScript
   file — both a developer convenience and the harness the script-level and
   differential test suites drive.
 - An npm package (`@mdy-docs/lamassu-js`, `packages/lamassu-js/`) exposing the
@@ -60,7 +60,7 @@ language.
 |---|---|---|
 | Host environment | Multiple / undecided | Core must be host-agnostic; per-target glue layers. |
 | Syntax scope | Basics + template literals, try/catch/throw, destructuring & spread, regex | Regex is feature-flagged and integrated last. |
-| Regex engine | Reuse [`third_party/baru-re`](../third_party/baru-re) (git submodule) | ECMAScript-flavored compiler + backtracking VM extracted from jsvm2; we write the binding layer, not the engine. |
+| Regex engine | Reuse [`third_party/baru-re`](../third_party/baru-re) (git submodule) | ECMAScript-flavored compiler + backtracking VM extracted from lamassu2; we write the binding layer, not the engine. |
 | String encoding | UTF-16 everywhere internally | Never raw NUL-terminated C strings; all string data is `uint16_t*` + code-unit length. Matches JS `.length`/indexing semantics and the regex engine's native format. |
 | Language mode | Strict mode only | All source compiles as an ES module (modules are strict by spec). No sloppy mode exists anywhere in the engine. |
 | Declarations | `let`/`const` only — no `var` | `var` stays a reserved word with a targeted error: `'var' is not supported; use 'let' or 'const'`. Never aliased to `let` (semantics differ). |
@@ -109,11 +109,11 @@ unaffected — the shared subset simply never contains `var`.
 ┌───────────────────────────────────────────┐
 │ per-host glue (thin)                      │  wasm_api.c (Emscripten, browser/Node
 │                                            │  via the npm package) — flat ABI: ptr+len
-│ native CLI (tools/jsvm) — file I/O and    │  strings, exported functions.
+│ native CLI (tools/lamassu) — file I/O and    │  strings, exported functions.
 │ UTF-8→UTF-16 conversion live here, not    │  native CLI links the core directly.
 │ in the core                               │
 ├───────────────────────────────────────────┤
-│ libjsvm core — portable C11               │  no static globals; allocator + host
+│ liblamassu core — portable C11               │  no static globals; allocator + host
 │ lexer → parser → compiler → interpreter   │  callbacks overridable via JsVmConfig
 │ GC, values, builtins, modules, promises   │  (defaults to libc realloc)
 └───────────────────────────────────────────┘
@@ -308,7 +308,7 @@ past phase 7.
 |---|---|---|
 | 1 | Repo scaffolding; native build; NaN-boxed `JsValue`; mark-sweep GC; interned strings/atoms; hash maps | 2–3 |
 | 2 | Lexer + parser → AST, incl. template literals, destructuring patterns, ASI | 3–4 |
-| 3 | Bytecode format, compiler, interpreter core: expressions, control flow, scoping; minimal `jsvm` CLI (compile + run a file, print result/errors) | 2–3 |
+| 3 | Bytecode format, compiler, interpreter core: expressions, control flow, scoping; minimal `lamassu` CLI (compile + run a file, print result/errors) | 2–3 |
 | 4 | Functions, closures/upvalues, heap-frame fibers, try/catch/throw | 2 |
 | 5 | ✅ Object/Array/String/Number methods, Math, JSON, statics + global conversions; freestanding math kernel; hidden per-type method tables | 2 |
 | 6 | ✅ Promises, microtask queue, async/await (fiber suspend/resume), Promise.all/race/allSettled, executor, top-level await, host promise API | 1–2 |
@@ -316,8 +316,9 @@ past phase 7.
 | 8 | ✅ Bytecode serializer + validating loader (`src/js_serialize.c`): versioned `.jsbc` format (magic/version/flags header, recursively-inlined function records, tagged constants); the loader treats input as untrusted and does structural + dataflow verification (bounded const/local/upvalue indices with kind checks, jump targets on instruction boundaries, guaranteed terminator, and an abstract stack-depth pass that proves no under/overflow and recomputes `max_stack` — the stored value is never trusted). The interpreter's array/object-builder and varargs/iterator opcodes were hardened to guard their operand types so any structurally-valid bytecode is safe to execute. **Modules are supported too**: a `.jsbc` carries a script/module kind byte; a module buffer records the body function tree plus link metadata (imports, star re-exports, dependency specifiers), while resolved deps and live exports are runtime state rebuilt on load. `js_bytecode_compile_module` compiles one module independently; `js_eval_module_bytecode` + a `JsBytecodeResolver` load/verify/link/evaluate a graph, deduplicating shared modules by specifier and reusing the phase-7 instantiate→link→evaluate pipeline unchanged — so live bindings, cycles, diamonds, and re-exports all work from bytecode. The loader validates the module opcodes the interpreter trusts (GET_IMPORT/IMPORT_NS import-index bounds) and re-wires every nested function's `->module`. CLI: `--emit-bytecode` auto-detects modules and `--run-bytecode` resolves sibling `<dep>.jsbc` files. Tests: `test/test_bytecode.c` (scripts) + `test/test_module_bc.c` (module graphs vs. source, kind confusion, and a module-record mutation sweep) under ASan/UBSan | 1 |
 | 9 | ✅ WASM export surface (`src/wasm_api.c`) + fuel/heap/frame limits (`JsVmConfig.fuel`/`heap_limit`, `JS_MAX_FRAMES` in `src/js_interp.c`) | 1–2 |
 | 10 | ✅ Regex: integrated `third_party/baru-re` — binding layer (`src/js_regexp.c`: RegExp global + literals, exec/test/toString, lastIndex protocol, match/matchAll/search/replace/replaceAll/split, named groups, `/d` indices), live-pattern cap (64), `JSVM_HAS_REGEX` compile flag (on in every build), and the engine-side step budget (`vm_context_set_step_budget`, added to baru-re) so catastrophic backtracking throws a catchable RangeError (see "Regex is the ReDoS hole") | 1–2 |
+| 11 | ✅ Async-only module loading (`src/js_module.c`): the sync resolvers (`JsModuleResolver`/`JsBytecodeResolver`, source-taking `js_eval_module`, `js_eval_module_bytecode`) were **removed** in favor of one async `JsModuleLoader` — a host callback returning a Promise that fulfills with source text (compiled), a `js_bytecode_value` buffer (loaded/verified), or any other object (adopted verbatim as a synthetic module's exports, e.g. an imported stylesheet), plus an optional synchronous `JsModuleCanonicalizer` that maps raw specifiers to the registry-identity key *before* dedupe (relative-path resolution; one loader call per canonical specifier, ever). `js_eval_module(ctx, spec)` returns a live Promise (poll with `js_promise_state`/`js_promise_result`, drive with `js_resolve` + `js_run_jobs`); only the fetch phase is async — a cycle-proof shared-counter graph walk gathers every transitive dep, then the unchanged synchronous instantiate→link runs, and `evaluate` is promise-chained (deps strictly left-to-right) so a top-level-await body suspended on a host promise keeps the root completion honestly pending across turns. `js_run_module` now returns the run's completion promise instead of silently dropping a still-pending TLA fiber (the promise roots the suspended fiber across host turns and full GCs). Dynamic `import(spec)` works in modules **and** plain scripts (`JS_OP_DYNAMIC_IMPORT`; empty referrer when there is no module) and shares the registry with static imports; `import.meta` and import attributes (`with`/`assert { ... }`) are explicit parse errors. Orchestration reuses the promise machinery itself (state objects + bound natives, the `Promise.all` idiom); `js_run_jobs` became reentrancy-safe (running-job stack) since module continuations drain jobs from inside jobs. Tests: `test/test_modules.c` (async loader: cross-turn multi-round settles with quiescent-queue assertions, synthetic/bytecode/source mixed graphs, dedup, rejection propagation, canonicalization), `test/test_dynamic_import.c`, reworked `test/test_module_bc.c`, all under ASan/UBSan | 1 |
 
-All phases through 10 are landed and tested. The only remaining item on the
+All phases through 11 are landed and tested. The only remaining item on the
 roadmap:
 
 | Phase | Contents | Sessions |
@@ -382,7 +383,7 @@ Tracked so differential testing against Node has a baseline.
 - **Unit tests from phase 1** — GC correctness (collection actually reclaims,
   roots survive) proven before anything is built on top.
 - **Script-level tests**: source files with expected output/errors, driven
-  through the `jsvm` CLI; the same suite runs against the wasm build.
+  through the `lamassu` CLI; the same suite runs against the wasm build.
 - **Differential testing**: run the shared subset against Node and compare
   results, catching semantic drift.
 - **Fuzzing**: libFuzzer/AFL targets for the lexer/parser, the interpreter

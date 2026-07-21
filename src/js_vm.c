@@ -119,10 +119,9 @@ JsContext *js_context_new(JsVm *vm) {
     ctx->repl_const = NULL;
     ctx->modules = NULL;
     ctx->module_count = ctx->module_cap = 0;
-    ctx->resolver = NULL;
-    ctx->resolver_ud = NULL;
-    ctx->bc_resolver = NULL;
-    ctx->bc_resolver_ud = NULL;
+    ctx->loader = NULL;
+    ctx->canon = NULL;
+    ctx->loader_ud = NULL;
     ctx->fiber = NULL;
     ctx->fuel = 0;
     ctx->error_pos = 0;
@@ -172,14 +171,11 @@ void js_context_free(JsContext *ctx) {
     js_realloc_raw(ctx->vm, ctx, sizeof *ctx, 0);
 }
 
-void js_set_module_resolver(JsContext *ctx, JsModuleResolver fn, void *ud) {
-    ctx->resolver = fn;
-    ctx->resolver_ud = ud;
-}
-
-void js_set_bytecode_resolver(JsContext *ctx, JsBytecodeResolver fn, void *ud) {
-    ctx->bc_resolver = fn;
-    ctx->bc_resolver_ud = ud;
+void js_set_module_loader(JsContext *ctx, JsModuleLoader load,
+                          JsModuleCanonicalizer canon, void *ud) {
+    ctx->loader = load;
+    ctx->canon = canon;
+    ctx->loader_ud = ud;
 }
 
 JsValue js_context_globals(JsContext *ctx) {

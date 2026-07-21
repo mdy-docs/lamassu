@@ -39,7 +39,7 @@ const value = await nativeThing();
 This is the mechanism `js_promise_new`/`js_resolve`/`js_reject`/
 `js_run_jobs` expose in the [C embedding API](/api/c-embedding). The npm
 package's WASM build exercises it with a small test-only
-`__nativeDefer`/`jsvm_settle_deferred` pair in its CI smoke test, settled
+`__nativeDefer`/`lamassu_settle_deferred` pair in its CI smoke test, settled
 from a real JS timer callback — the same pattern a browser or Node host
 would use with its own event loop.
 

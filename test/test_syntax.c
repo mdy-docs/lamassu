@@ -462,6 +462,13 @@ static void dump_node(Sb *sb, const JsAstNode *n) {
         dump_child(sb, n->a);
         sb_printf(sb, ")");
         break;
+    case JS_AST_IMPORT_CALL:
+        sb_printf(sb, "(import-call");
+        dump_child(sb, n->a);
+        if (n->b)
+            dump_child(sb, n->b);
+        sb_printf(sb, ")");
+        break;
     case JS_AST_HOLE:
         sb_printf(sb, "_");
         break;
@@ -765,9 +772,20 @@ static void test_errors(void) {
     check_err("eval = 1;", "cannot assign to 'eval'", -1);
     check_err("let eval = 1;", "cannot bind 'eval'", -1);
     check_err("o = {get x() { return 1; }};", "getter/setter properties are not supported", -1);
-    check_err("f = x => y => import(\"m\");", "dynamic import() is not supported", -1);
     check_err("tag`x`;", "tagged templates are not supported", -1);
     check_err("if (x) import \"m\";", "top level", -1);
+    check_err("x = import.meta;", "import.meta is not supported", -1);
+    check_err("p = import();", "import() takes 1 or 2 arguments", -1);
+    check_err("p = import('a', 'b', 'c');", "import() takes 1 or 2 arguments", -1);
+    check_err("p = import(...xs);", "spread is not allowed in import()", -1);
+    check_err("import { x } from 'm' with { type: 'json' };",
+              "import attributes are not supported", -1);
+    check_err("import d from 'm' assert { type: 'json' };",
+              "import attributes are not supported", -1);
+    check_err("export { x } from 'm' with { type: 'json' };",
+              "import attributes are not supported", -1);
+    check_err("export * from 'm' with { type: 'json' };",
+              "import attributes are not supported", -1);
     check_err("x = '\\101';", "octal escapes are not allowed", -1);
     check_err("debugger;", "'debugger' is not supported", 0);
 }

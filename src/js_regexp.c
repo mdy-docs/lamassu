@@ -15,7 +15,7 @@
  * string methods leave lastIndex at 0 (global) / untouched (non-global)
  * rather than emulating every intermediate spec mutation.
  */
-#ifdef JSVM_HAS_REGEX
+#ifdef LAMASSU_HAS_REGEX
 
 #include "js_bytecode.h"
 #include "js_regexp.h"
@@ -1202,6 +1202,6 @@ bool js_regexp_builtins_init(JsContext *ctx) {
     return true;
 }
 
-#else /* !JSVM_HAS_REGEX: keep the translation unit non-empty */
+#else /* !LAMASSU_HAS_REGEX: keep the translation unit non-empty */
 typedef int js_regexp_disabled;
 #endif

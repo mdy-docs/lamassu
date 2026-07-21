@@ -15,6 +15,7 @@ typedef enum JsGcKind {
     JS_KIND_NATIVE = 7,   /* callable host function */
     JS_KIND_PROMISE = 8,
     JS_KIND_MODULE = 9,
+    JS_KIND_BYTECODE = 10, /* opaque module-bytecode buffer (js_bytecode_value) */
 } JsGcKind;
 
 /* Every GC allocation starts with this header; cells live on vm->cells. */
@@ -54,7 +55,7 @@ typedef struct JsMap {
 typedef enum JsObjKind {
     JS_OBJ_PLAIN = 0,
     JS_OBJ_ARRAY = 1,
-    JS_OBJ_REGEXP = 2, /* JsRegExp (js_regexp.h); only when JSVM_HAS_REGEX */
+    JS_OBJ_REGEXP = 2, /* JsRegExp (js_regexp.h); only when LAMASSU_HAS_REGEX */
     JS_OBJ_DATE = 3,   /* JsDateObject (js_date.h) */
     JS_OBJ_MAP = 4,    /* JsMapObj (js_mapobj.h) */
     JS_OBJ_SET = 5,    /* JsSetObj (js_setobj.h) */
@@ -242,17 +243,18 @@ typedef struct JsStarExport {
 } JsStarExport;
 
 typedef enum JsModuleStatus {
-    JS_MOD_UNLINKED = 0,
-    JS_MOD_LINKING = 1,
-    JS_MOD_LINKED = 2,
-    JS_MOD_EVALUATING = 3,
-    JS_MOD_EVALUATED = 4,
-    JS_MOD_ERRORED = 5,
+    JS_MOD_FETCHING = 0, /* loader promise in flight; body/exports unknown */
+    JS_MOD_UNLINKED = 1,
+    JS_MOD_LINKING = 2,
+    JS_MOD_LINKED = 3,
+    JS_MOD_EVALUATING = 4,
+    JS_MOD_EVALUATED = 5,
+    JS_MOD_ERRORED = 6,
 } JsModuleStatus;
 
 struct JsModule {
     JsGcCell gc;
-    JsString *specifier;      /* resolved specifier (cache/identity key) */
+    JsString *specifier;      /* canonical specifier (cache/identity key) */
     JsFunctionCell *body;     /* compiled module body (NULL until compiled) */
     JsObject *exports;        /* namespace/exports object (live bindings) */
     JsModuleImport *imports;  /* import descriptors (indexed by GET_IMPORT) */
@@ -264,8 +266,22 @@ struct JsModule {
     JsModule **deps;          /* resolved dependency modules (parallel to dep_specs) */
     uint32_t dep_count;
     uint8_t status;
+    bool synthetic;           /* exports adopted from a loader-resolved object */
     JsValue eval_error;
+    /* Settles once this module's source/bytecode/synthetic exports have
+     * arrived and been compiled/adopted (dep_specs known; deps NOT yet
+     * fetched) — a shallow per-module signal the graph loader composes.
+     * Fulfills with the module itself (disguised as a JsValue), rejects with
+     * the load error. Rooted through the registry for the module's lifetime. */
+    JsPromise *fetch_promise;
 };
+
+/* Opaque host-provided module bytecode; bytes owned by the cell. */
+typedef struct JsBytecode {
+    JsGcCell gc;
+    size_t length;
+    uint8_t bytes[];
+} JsBytecode;
 
 typedef struct JsFrame {
     JsClosure *closure;
@@ -337,7 +353,7 @@ struct JsContext {
                              * anything below — see js_object_new's bootstrap
                              * comment in js_object.c. */
     JsObject *array_proto;
-    JsObject *regexp_proto; /* NULL unless built with JSVM_HAS_REGEX */
+    JsObject *regexp_proto; /* NULL unless built with LAMASSU_HAS_REGEX */
     JsObject *date_proto;
     JsObject *map_proto;
     JsObject *set_proto;
@@ -347,13 +363,12 @@ struct JsContext {
      * created and only used by REPL-mode compilation. */
     JsObject *repl_scope;
     JsObject *repl_const;
-    /* module registry (cache by specifier; all GC roots) */
+    /* module registry (cache by canonical specifier; all GC roots) */
     JsModule **modules;
     uint32_t module_count, module_cap;
-    JsModuleResolver resolver;
-    void *resolver_ud;
-    JsBytecodeResolver bc_resolver; /* module-bytecode dep resolver; may be NULL */
-    void *bc_resolver_ud;
+    JsModuleLoader loader;          /* async module loader; may be NULL */
+    JsModuleCanonicalizer canon;    /* sync specifier canonicalizer; may be NULL */
+    void *loader_ud;                /* shared userdata for loader + canon */
     JsFiber *fiber;     /* current/last fiber; GC root */
     uint64_t fuel;      /* budget for new runs; 0 = unlimited */
     uint32_t error_pos; /* source offset of last runtime error */

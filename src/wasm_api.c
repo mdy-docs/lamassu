@@ -2,11 +2,11 @@
  * Browser/Node embedding surface (built with emscripten, which supplies libc
  * malloc/realloc/free). Keeps one persistent VM+context so state carries
  * across evals; a `print()` native captures output into a growing buffer
- * that jsvm_eval returns as a NUL-terminated UTF-8 string.
+ * that lamassu_eval returns as a NUL-terminated UTF-8 string.
  *
  * Exposed to JS (see the Makefile `pkg` target):
- *   const char *jsvm_eval(const char *src_utf8);  // output + result/error
- *   void        jsvm_reset(void);                 // fresh VM
+ *   const char *lamassu_eval(const char *src_utf8);  // output + result/error
+ *   void        lamassu_reset(void);                 // fresh VM
  *
  * HOST CALLS: guest code can call `__hostcall(name, argsJson)` — a native
  * that suspends the entire wasm execution (emscripten Asyncify) while the
@@ -215,9 +215,9 @@ static bool native_hostcall(JsContext *ctx, JsValue this_val, const JsValue *arg
 /*
  * __nativeDefer(id): the OTHER host-async mechanism (see js_promise.c) —
  * returns a pending promise immediately (no Asyncify involved) that guest
- * code `await`s; the fiber suspends at the interpreter level and jsvm_eval
+ * code `await`s; the fiber suspends at the interpreter level and lamassu_eval
  * returns with the module still pending. The host settles it later, from a
- * real JS callback (timer, fetch, …), via jsvm_settle_deferred(id, value)
+ * real JS callback (timer, fetch, …), via lamassu_settle_deferred(id, value)
  * below. Exists to exercise this path as compiled WASM in Node, which
  * __hostcall's Asyncify-based test does not cover.
  */
@@ -247,9 +247,9 @@ static bool native_native_defer(JsContext *ctx, JsValue this_val, const JsValue 
 
 /* Settles a pending __nativeDefer(id) promise with a string value and drains
  * the microtask queue, resuming any guest fiber awaiting it. Call
- * jsvm_eval again afterward to observe the result (e.g. a persisted global
+ * lamassu_eval again afterward to observe the result (e.g. a persisted global
  * the guest assigned the awaited value to). */
-EXPORT void jsvm_settle_deferred(int id, const char *value_utf8) {
+EXPORT void lamassu_settle_deferred(int id, const char *value_utf8) {
     if (!g_ctx || id < 0 || id >= MAX_DEFERRED || !g_deferred_live[id])
         return;
     JsValue v = string_value_from_utf8(value_utf8 ? value_utf8 : "");
@@ -316,7 +316,7 @@ static size_t utf8_to_utf16(const char *in, size_t len, uint16_t *out) {
     return n;
 }
 
-EXPORT void jsvm_reset(void) {
+EXPORT void lamassu_reset(void) {
     if (g_vm) {
         js_vm_free(g_vm);
         g_vm = NULL;
@@ -330,7 +330,7 @@ EXPORT void jsvm_reset(void) {
  * NUL-terminated UTF-8 buffer (valid until the next call) holding any
  * print() output followed by the completion value or an error line.
  */
-EXPORT const char *jsvm_eval(const char *src_utf8) {
+EXPORT const char *lamassu_eval(const char *src_utf8) {
     ensure_vm();
     buf_reset();
     if (!g_buf)
@@ -353,8 +353,10 @@ EXPORT const char *jsvm_eval(const char *src_utf8) {
         buf_cstr(err_msg ? err_msg : "compile error");
     } else {
         js_gc_protect(g_vm, &fn);
-        JsValue result;
-        bool ok = js_run_module(g_ctx, fn, &result);
+        JsValue p = js_run_module(g_ctx, fn);
+        int st = js_promise_state(p);
+        bool ok = st == 0 || st == 1;
+        JsValue result = js_promise_result(p);
         js_gc_protect(g_vm, &result);
         if (ok) {
             buf_cstr("\xE2\x87\x92 "); /* U+21D2 rightwards double arrow */

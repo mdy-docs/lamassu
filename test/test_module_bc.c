@@ -2,11 +2,11 @@
  * Module-bytecode tests (phase 8, modules). A tiny in-memory module table
  * holds each module's source; every module is compiled independently to a
  * bytecode buffer (js_bytecode_compile_module), then the graph is loaded,
- * linked, and evaluated from bytecode through a bytecode resolver
- * (js_eval_module_bytecode) — and the result is compared against evaluating
- * the same graph directly from source. Also checks kind confusion (script vs
- * module) is rejected and that tampered module bytecode is rejected without
- * crashing (ASan/UBSan via the _asan build).
+ * linked, and evaluated from bytecode through a module loader fulfilling
+ * with js_bytecode_value buffers — and the result is compared against
+ * evaluating the same graph from source. Also checks kind confusion (script
+ * vs module) is rejected and that tampered module bytecode is rejected
+ * without crashing (ASan/UBSan via the _asan build).
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -68,13 +68,6 @@ static void mod_add(const char *name, const char *src) {
     g_mods.bc[i] = NULL;
 }
 
-static int mod_index(const char *name) {
-    for (int k = 0; k < g_mods.count; k++)
-        if (strcmp(g_mods.names[k], name) == 0)
-            return k;
-    return -1;
-}
-
 static void mods_reset(void) {
     for (int i = 0; i < g_mods.count; i++) {
         free(g_mods.src[i]);
@@ -95,46 +88,56 @@ static int mod_find(const uint16_t *spec, size_t spec_len) {
     return -1;
 }
 
-/* ---- source resolver (baseline) ---- */
+/* ---- loaders ---- */
 
-static uint16_t g_spec_buf[128];
+static JsValue fulfilled_with(JsContext *ctx, JsVm *vm, JsValue v) {
+    js_gc_protect(vm, &v);
+    JsValue p = js_promise_new(ctx);
+    js_resolve(ctx, p, v);
+    js_gc_unprotect(vm, &v);
+    return p;
+}
 
-static bool src_resolver(void *ud, const uint16_t *spec, size_t spec_len,
-                         const uint16_t *ref, size_t ref_len, const uint16_t **out_spec,
-                         size_t *out_spec_len, const uint16_t **out_source, size_t *out_len) {
-    (void)ud;
+static JsValue rejected_not_found(JsContext *ctx, JsVm *vm) {
+    static const uint16_t msg[] = {'m', 'o', 'd', 'u', 'l', 'e', ' ',
+                                   'n', 'o', 't', ' ', 'f', 'o', 'u', 'n', 'd'};
+    JsValue reason = js_atom(vm, msg, 16);
+    js_gc_protect(vm, &reason);
+    JsValue p = js_promise_new(ctx);
+    js_reject(ctx, p, reason);
+    js_gc_unprotect(vm, &reason);
+    return p;
+}
+
+/* baseline: fulfill with source text */
+static JsValue src_loader(void *ud, JsContext *ctx, const uint16_t *spec, size_t spec_len,
+                          const uint16_t *ref, size_t ref_len) {
+    JsVm *vm = ud;
     (void)ref;
     (void)ref_len;
     int i = mod_find(spec, spec_len);
     if (i < 0)
-        return false;
-    for (size_t k = 0; k < spec_len && k < 128; k++)
-        g_spec_buf[k] = spec[k];
-    *out_spec = g_spec_buf;
-    *out_spec_len = spec_len;
-    *out_source = g_mods.src[i];
-    *out_len = g_mods.src_len[i];
-    return true;
+        return rejected_not_found(ctx, vm);
+    return fulfilled_with(ctx, vm, js_atom(vm, g_mods.src[i], g_mods.src_len[i]));
 }
 
-/* ---- bytecode resolver ---- */
+/* bytecode: fulfill with js_bytecode_value buffers; the tamper sweep swaps
+ * in a mutated buffer for 'main' via the override */
+static const uint8_t *g_override_bc;
+static size_t g_override_len;
 
-static bool bc_resolver(void *ud, const uint16_t *spec, size_t spec_len,
-                        const uint16_t *ref, size_t ref_len, const uint16_t **out_spec,
-                        size_t *out_spec_len, const uint8_t **out_bc, size_t *out_len) {
-    (void)ud;
+static JsValue bc_loader(void *ud, JsContext *ctx, const uint16_t *spec, size_t spec_len,
+                         const uint16_t *ref, size_t ref_len) {
+    JsVm *vm = ud;
     (void)ref;
     (void)ref_len;
+    if (g_override_bc && spec_len == 4 && spec[0] == 'm' && spec[1] == 'a' &&
+        spec[2] == 'i' && spec[3] == 'n')
+        return fulfilled_with(ctx, vm, js_bytecode_value(ctx, g_override_bc, g_override_len));
     int i = mod_find(spec, spec_len);
     if (i < 0 || !g_mods.bc[i])
-        return false;
-    for (size_t k = 0; k < spec_len && k < 128; k++)
-        g_spec_buf[k] = spec[k];
-    *out_spec = g_spec_buf;
-    *out_spec_len = spec_len;
-    *out_bc = g_mods.bc[i];
-    *out_len = g_mods.bc_len[i];
-    return true;
+        return rejected_not_found(ctx, vm);
+    return fulfilled_with(ctx, vm, js_bytecode_value(ctx, g_mods.bc[i], g_mods.bc_len[i]));
 }
 
 /* Compiles every registered module to its own bytecode buffer (fresh VM each,
@@ -169,30 +172,33 @@ static bool compile_all(void) {
     return true;
 }
 
-/* Evaluates root `name` from source, reads export `exp`, returns ToString. */
-static char *eval_src(const char *name, const char *exp, bool *ok) {
+/* Evaluates root `name` through `load`, reads export `exp`, returns ToString. */
+static char *eval_with(JsModuleLoader load, const char *name, const char *exp, bool *ok) {
     CountAlloc ca = {0, 0};
     JsVmConfig cfg = {.realloc_fn = count_realloc, .alloc_ud = &ca};
     JsVm *vm = js_vm_new(&cfg);
     JsContext *ctx = js_context_new(vm);
-    js_set_module_resolver(ctx, src_resolver, NULL);
+    js_set_module_loader(ctx, load, NULL, vm);
     size_t nlen;
     uint16_t *nu = to_u16(name, &nlen);
-    int idx = mod_index(name);
-    bool ev;
-    const char *em;
-    uint32_t ep;
-    JsValue ns = js_eval_module(ctx, nu, nlen, g_mods.src[idx], g_mods.src_len[idx],
-                                &ev, &em, &ep);
-    js_gc_protect(vm, &ns);
-    *ok = ev;
+    JsValue p = js_eval_module(ctx, nu, nlen);
+    js_gc_protect(vm, &p);
+    int st = js_promise_state(p);
+    *ok = st == 1;
     char *out;
-    if (!ev) {
-        out = strdup(em ? em : "eval error");
+    JsValue result = js_promise_result(p);
+    if (st != 1) {
+        JsValue s = js_to_string(ctx, result);
+        size_t sl;
+        const uint16_t *sv = js_string_units(s, &sl);
+        out = malloc(sl + 1);
+        for (size_t k = 0; k < sl; k++)
+            out[k] = sv && sv[k] < 128 ? (char)sv[k] : '?';
+        out[sl] = 0;
     } else {
         size_t elen;
         uint16_t *eu = to_u16(exp, &elen);
-        JsValue v = js_module_get_export(ctx, ns, eu, elen);
+        JsValue v = js_module_get_export(ctx, result, eu, elen);
         free(eu);
         js_gc_protect(vm, &v);
         JsValue s = js_to_string(ctx, v);
@@ -204,48 +210,15 @@ static char *eval_src(const char *name, const char *exp, bool *ok) {
         out[sl] = 0;
         js_gc_unprotect(vm, &v);
     }
+    js_gc_unprotect(vm, &p);
     free(nu);
     js_vm_free(vm);
-    return out;
-}
-
-/* Evaluates root `name` from bytecode (deps via bc_resolver), same contract. */
-static char *eval_bc(const char *name, const char *exp, bool *ok) {
-    CountAlloc ca = {0, 0};
-    JsVmConfig cfg = {.realloc_fn = count_realloc, .alloc_ud = &ca};
-    JsVm *vm = js_vm_new(&cfg);
-    JsContext *ctx = js_context_new(vm);
-    js_set_bytecode_resolver(ctx, bc_resolver, NULL);
-    int idx = mod_index(name);
-    size_t nlen;
-    uint16_t *nu = to_u16(name, &nlen);
-    bool ev;
-    const char *em;
-    uint32_t ep;
-    JsValue ns = js_eval_module_bytecode(ctx, nu, nlen, g_mods.bc[idx], g_mods.bc_len[idx],
-                                         &ev, &em, &ep);
-    js_gc_protect(vm, &ns);
-    *ok = ev;
-    char *out;
-    if (!ev) {
-        out = strdup(em ? em : "eval error");
-    } else {
-        size_t elen;
-        uint16_t *eu = to_u16(exp, &elen);
-        JsValue v = js_module_get_export(ctx, ns, eu, elen);
-        free(eu);
-        js_gc_protect(vm, &v);
-        JsValue s = js_to_string(ctx, v);
-        size_t sl;
-        const uint16_t *sv = js_string_units(s, &sl);
-        out = malloc(sl + 1);
-        for (size_t k = 0; k < sl; k++)
-            out[k] = sv && sv[k] < 128 ? (char)sv[k] : '?';
-        out[sl] = 0;
-        js_gc_unprotect(vm, &v);
+    checks_run++;
+    if (ca.net_bytes != 0 || ca.live_allocs != 0) {
+        checks_failed++;
+        fprintf(stderr, "FAIL leak: %s (net=%ld allocs=%ld)\n", name, ca.net_bytes,
+                ca.live_allocs);
     }
-    free(nu);
-    js_vm_free(vm);
     return out;
 }
 
@@ -263,8 +236,8 @@ static void expect(const char *root, const char *exp, const char *expected) {
         return;
     }
     bool sok, bok;
-    char *s = eval_src(root, exp, &sok);
-    char *b = eval_bc(root, exp, &bok);
+    char *s = eval_with(src_loader, root, exp, &sok);
+    char *b = eval_with(bc_loader, root, exp, &bok);
     if (!sok || !bok || strcmp(s, expected) != 0 || strcmp(s, b) != 0) {
         checks_failed++;
         fprintf(stderr, "FAIL root=%s.%s\n  expected: %s\n  source:   %s%s\n  bytecode: %s%s\n",
@@ -334,19 +307,21 @@ static void test_graphs(void) {
 
 /* ---- kind confusion + tamper resistance ---- */
 
-/* Loads a buffer as a module and evaluates; returns true if it LOADED. Fuel-
- * capped so a mutant that loops can't hang. Never crashes (ASan-enforced). */
-static bool try_module_bc(JsContext *ctx, const uint8_t *buf, size_t len) {
-    js_set_bytecode_resolver(ctx, bc_resolver, NULL);
+/* Loads a buffer as module 'main' (deps via bc_loader) and evaluates;
+ * returns true if the completion fulfilled. Fuel-capped so a mutant that
+ * loops can't hang. Never crashes (ASan-enforced). */
+static bool try_module_bc(JsContext *ctx, JsVm *vm, const uint8_t *buf, size_t len) {
     static const uint16_t spec[] = {'m', 'a', 'i', 'n'};
+    g_override_bc = buf;
+    g_override_len = len;
     js_context_set_fuel(ctx, 2000000);
-    bool ok;
-    const char *em;
-    uint32_t ep;
-    JsValue ns = js_eval_module_bytecode(ctx, spec, 4, buf, len, &ok, &em, &ep);
-    (void)ns;
+    JsValue p = js_eval_module(ctx, spec, 4);
+    js_gc_protect(vm, &p);
+    bool ok = js_promise_state(p) == 1;
+    js_gc_unprotect(vm, &p);
     js_context_set_fuel(ctx, 0);
-    return ok || (em == NULL); /* "loaded" ~ produced no structural error */
+    g_override_bc = NULL;
+    return ok;
 }
 
 static void test_kind_and_tamper(void) {
@@ -386,8 +361,9 @@ static void test_kind_and_tamper(void) {
         JsVmConfig cfg = {.realloc_fn = count_realloc, .alloc_ud = &ca};
         JsVm *vm = js_vm_new(&cfg);
         JsContext *ctx = js_context_new(vm);
+        js_set_module_loader(ctx, bc_loader, NULL, vm);
         checks_run++;
-        if (!try_module_bc(ctx, bc, len)) {
+        if (!try_module_bc(ctx, vm, bc, len)) {
             checks_failed++;
             fprintf(stderr, "FAIL: valid module buffer failed to load/eval\n");
         }
@@ -396,28 +372,31 @@ static void test_kind_and_tamper(void) {
 
     /*
      * Mutation sweep over the module buffer: every byte (past the magic) x
-     * three mutations, loaded+evaluated on one shared fuel-capped context. The
-     * loader must be memory-safe on arbitrary input and never emit a module
-     * that is unsafe to run — the point being that the import-index bounds and
-     * module-opcode gating hold under corruption. ASan/UBSan enforces it.
+     * three mutations, each loaded+evaluated in a fresh registry (the module
+     * cache is keyed by specifier, so reusing one context would just replay
+     * the first load). The loader must be memory-safe on arbitrary input and
+     * never emit a module that is unsafe to run — the point being that the
+     * import-index bounds and module-opcode gating hold under corruption.
+     * ASan/UBSan enforces it.
      */
-    CountAlloc ca = {0, 0};
-    JsVmConfig cfg = {.realloc_fn = count_realloc, .alloc_ud = &ca};
-    JsVm *vm = js_vm_new(&cfg);
-    JsContext *ctx = js_context_new(vm);
     const uint8_t muts[3] = {0xA5, 0x00, 0xFF};
     int total = 0;
+    uint8_t *t = malloc(len);
     for (size_t i = 4; i < len; i++) {
-        uint8_t *t = malloc(len);
         for (int mi = 0; mi < 3; mi++) {
+            CountAlloc ca = {0, 0};
+            JsVmConfig cfg = {.realloc_fn = count_realloc, .alloc_ud = &ca};
+            JsVm *vm = js_vm_new(&cfg);
+            JsContext *ctx = js_context_new(vm);
+            js_set_module_loader(ctx, bc_loader, NULL, vm);
             memcpy(t, bc, len);
             t[i] = mi == 0 ? (uint8_t)(bc[i] ^ 0xA5) : muts[mi];
-            (void)try_module_bc(ctx, t, len);
+            (void)try_module_bc(ctx, vm, t, len);
             total++;
+            js_vm_free(vm);
         }
-        free(t);
     }
-    js_vm_free(vm);
+    free(t);
     checks_run++;
     if (total == 0) {
         checks_failed++;

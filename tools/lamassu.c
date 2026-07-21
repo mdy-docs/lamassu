@@ -1,5 +1,5 @@
 /*
- * jsvm — compile and run a JavaScript (jsvm subset) file.
+ * lamassu — compile and run a JavaScript (lamassu subset) file.
  *
  * Host-side tool: file I/O and UTF-8 <-> UTF-16 conversion live here, never
  * in the core. Prints the module's completion value (REPL-style), or a
@@ -125,23 +125,44 @@ static void print_utf16(FILE *f, const uint16_t *units, size_t len) {
     }
 }
 
-/* ---- module resolver (file-based, relative to the root file's dir) ---- */
+/* ---- module loader (file-based, relative to the root file's dir) ---- */
 
 static char g_root_dir[1024];
-/* keep resolved sources/specifiers alive until program exit (CLI simplicity) */
-#define MAX_RES 64
-static uint16_t *g_res_src[MAX_RES];
-static uint16_t *g_res_spec[MAX_RES];
-static int g_res_count;
+/* the entry file's pre-read source, served for the '<root>' specifier */
+static const uint16_t *g_root_src;
+static size_t g_root_src_len;
 
-static bool file_resolver(void *ud, const uint16_t *spec, size_t spec_len,
-                          const uint16_t *ref, size_t ref_len, const uint16_t **out_spec,
-                          size_t *out_spec_len, const uint16_t **out_source, size_t *out_len) {
-    (void)ud;
+static JsValue cli_fulfilled(JsContext *ctx, JsVm *vm, JsValue v) {
+    js_gc_protect(vm, &v);
+    JsValue p = js_promise_new(ctx);
+    js_resolve(ctx, p, v);
+    js_gc_unprotect(vm, &v);
+    return p;
+}
+
+static JsValue cli_rejected(JsContext *ctx, JsVm *vm, const char *msg) {
+    size_t n = strlen(msg);
+    uint16_t u[128];
+    if (n > 127)
+        n = 127;
+    for (size_t i = 0; i < n; i++)
+        u[i] = (uint16_t)(unsigned char)msg[i];
+    JsValue reason = js_atom(vm, u, n);
+    js_gc_protect(vm, &reason);
+    JsValue p = js_promise_new(ctx);
+    js_reject(ctx, p, reason);
+    js_gc_unprotect(vm, &reason);
+    return p;
+}
+
+static JsValue file_loader(void *ud, JsContext *ctx, const uint16_t *spec, size_t spec_len,
+                           const uint16_t *ref, size_t ref_len) {
+    JsVm *vm = ud;
     (void)ref;
     (void)ref_len;
-    if (g_res_count >= MAX_RES)
-        return false;
+    static const uint16_t rootspec[] = {'<', 'r', 'o', 'o', 't', '>'};
+    if (g_root_src && spec_len == 6 && memcmp(spec, rootspec, sizeof rootspec) == 0)
+        return cli_fulfilled(ctx, vm, js_atom(vm, g_root_src, g_root_src_len));
     /* build path = root_dir/spec, appending .js if no extension */
     char name[512];
     size_t n = spec_len < 500 ? spec_len : 500;
@@ -159,23 +180,15 @@ static bool file_resolver(void *ud, const uint16_t *spec, size_t spec_len,
     size_t bl;
     uint8_t *bytes = read_file(path, &bl);
     if (!bytes)
-        return false;
+        return cli_rejected(ctx, vm, "module not found");
     size_t slen;
     uint16_t *src = utf8_to_utf16(bytes, bl, &slen);
     free(bytes);
     if (!src)
-        return false;
-    uint16_t *sp = malloc((spec_len + 1) * sizeof(uint16_t));
-    for (size_t i = 0; i < spec_len; i++)
-        sp[i] = spec[i];
-    g_res_src[g_res_count] = src;
-    g_res_spec[g_res_count] = sp;
-    g_res_count++;
-    *out_spec = sp;
-    *out_spec_len = spec_len;
-    *out_source = src;
-    *out_len = slen;
-    return true;
+        return cli_rejected(ctx, vm, "out of memory");
+    JsValue v = js_atom(vm, src, slen);
+    free(src);
+    return cli_fulfilled(ctx, vm, v);
 }
 
 static void set_root_dir(const char *file) {
@@ -193,13 +206,13 @@ static int run_repl(void) {
     JsVm *vm = js_vm_new(NULL);
     JsContext *ctx = js_context_new(vm);
     if (!vm || !ctx) {
-        fprintf(stderr, "jsvm: out of memory\n");
+        fprintf(stderr, "lamassu: out of memory\n");
         return 2;
     }
     static const uint16_t print_name[] = {'p', 'r', 'i', 'n', 't'};
     js_register_native(ctx, print_name, 5, native_print, NULL);
 
-    fprintf(stderr, "jsvm REPL — Ctrl-D to exit\n");
+    fprintf(stderr, "lamassu REPL — Ctrl-D to exit\n");
     char line[8192];
     for (;;) {
         fputs("> ", stderr);
@@ -220,8 +233,10 @@ static int run_repl(void) {
             fprintf(stderr, "SyntaxError: %s\n", err_msg ? err_msg : "compile error");
         } else {
             js_gc_protect(vm, &fn);
-            JsValue result;
-            bool ok = js_run_module(ctx, fn, &result);
+            JsValue p = js_run_module(ctx, fn);
+            int st = js_promise_state(p);
+            bool ok = st == 0 || st == 1;
+            JsValue result = js_promise_result(p);
             js_gc_protect(vm, &result);
             JsValue str = js_to_string(ctx, result);
             size_t sl;
@@ -280,70 +295,65 @@ static size_t spec_base(const uint16_t *spec, size_t n, uint16_t *out, size_t ca
     return m;
 }
 
-/* ---- bytecode module resolver (reads sibling <base>.jsbc from root dir) ---- */
+/* ---- bytecode module loader (reads sibling <base>.jsbc from root dir) ---- */
 
-#define MAX_BC_RES 64
-static uint8_t *g_bc_buf[MAX_BC_RES];
-static uint16_t *g_bc_spec[MAX_BC_RES];
-static int g_bc_count;
-
-static bool bc_file_resolver(void *ud, const uint16_t *spec, size_t spec_len,
-                             const uint16_t *ref, size_t ref_len, const uint16_t **out_spec,
-                             size_t *out_spec_len, const uint8_t **out_bc, size_t *out_len) {
+/* canonical identity for bytecode modules is the specifier's base name */
+static uint16_t g_bc_canon[256];
+static bool bc_canonicalize(void *ud, const uint16_t *spec, size_t spec_len,
+                            const uint16_t *ref, size_t ref_len,
+                            const uint16_t **out, size_t *out_len) {
     (void)ud;
     (void)ref;
     (void)ref_len;
-    if (g_bc_count >= MAX_BC_RES)
-        return false;
-    uint16_t base[256];
-    size_t bn = spec_base(spec, spec_len, base, 256);
+    *out_len = spec_base(spec, spec_len, g_bc_canon, 256);
+    *out = g_bc_canon;
+    return true;
+}
+
+static JsValue bc_file_loader(void *ud, JsContext *ctx, const uint16_t *spec, size_t spec_len,
+                              const uint16_t *ref, size_t ref_len) {
+    JsVm *vm = ud;
+    (void)ref;
+    (void)ref_len;
     char path[2048];
     char name[512];
-    size_t nn = bn < 500 ? bn : 500;
+    size_t nn = spec_len < 500 ? spec_len : 500;
     for (size_t i = 0; i < nn; i++)
-        name[i] = (char)(base[i] < 128 ? base[i] : '_');
+        name[i] = (char)(spec[i] < 128 ? spec[i] : '_');
     name[nn] = 0;
     snprintf(path, sizeof path, "%s/%s.jsbc", g_root_dir, name);
 
     size_t bl;
     uint8_t *bytes = read_file(path, &bl);
     if (!bytes)
-        return false;
-    uint16_t *sp = malloc((bn + 1) * sizeof(uint16_t));
-    for (size_t i = 0; i < bn; i++)
-        sp[i] = base[i];
-    g_bc_buf[g_bc_count] = bytes;   /* freed at exit (CLI simplicity) */
-    g_bc_spec[g_bc_count] = sp;
-    g_bc_count++;
-    *out_spec = sp;
-    *out_spec_len = bn;
-    *out_bc = bytes;
-    *out_len = bl;
-    return true;
+        return cli_rejected(ctx, vm, "module bytecode not found");
+    JsValue v = js_bytecode_value(ctx, bytes, bl);
+    free(bytes);
+    return cli_fulfilled(ctx, vm, v);
 }
 
 /*
- * jsvm --emit-bytecode SRC OUT: compile SRC (a non-module script) and write a
+ * lamassu --emit-bytecode SRC OUT: compile SRC (a non-module script) and write a
  * validated-on-load bytecode cache to OUT.
  */
 static int emit_bytecode(const char *src_path, const char *out_path) {
     size_t byte_len;
     uint8_t *bytes = read_file(src_path, &byte_len);
     if (!bytes) {
-        fprintf(stderr, "jsvm: cannot read %s\n", src_path);
+        fprintf(stderr, "lamassu: cannot read %s\n", src_path);
         return 2;
     }
     size_t len;
     uint16_t *src = utf8_to_utf16(bytes, byte_len, &len);
     free(bytes);
     if (!src) {
-        fprintf(stderr, "jsvm: out of memory\n");
+        fprintf(stderr, "lamassu: out of memory\n");
         return 2;
     }
     JsVm *vm = js_vm_new(NULL);
     JsContext *ctx = js_context_new(vm);
     if (!vm || !ctx) {
-        fprintf(stderr, "jsvm: out of memory\n");
+        fprintf(stderr, "lamassu: out of memory\n");
         return 2;
     }
     const char *err_msg;
@@ -377,7 +387,7 @@ static int emit_bytecode(const char *src_path, const char *out_path) {
         js_gc_protect(vm, &fn);
         have = js_bytecode_serialize(ctx, fn, &out, &out_len);
         if (!have) {
-            fprintf(stderr, "jsvm: bytecode serialization failed\n");
+            fprintf(stderr, "lamassu: bytecode serialization failed\n");
             status = 2;
         }
         js_gc_unprotect(vm, &fn);
@@ -386,7 +396,7 @@ static int emit_bytecode(const char *src_path, const char *out_path) {
     if (have) {
         status = write_file(out_path, out, out_len);
         if (status)
-            fprintf(stderr, "jsvm: cannot write %s\n", out_path);
+            fprintf(stderr, "lamassu: cannot write %s\n", out_path);
         js_bytecode_free(ctx, out, out_len);
     }
     js_vm_free(vm);
@@ -394,18 +404,18 @@ static int emit_bytecode(const char *src_path, const char *out_path) {
     return status;
 }
 
-/* jsvm --run-bytecode FILE.jsbc: load, validate, and run a bytecode cache. */
+/* lamassu --run-bytecode FILE.jsbc: load, validate, and run a bytecode cache. */
 static int run_bytecode(const char *path) {
     size_t len;
     uint8_t *bytes = read_file(path, &len);
     if (!bytes) {
-        fprintf(stderr, "jsvm: cannot read %s\n", path);
+        fprintf(stderr, "lamassu: cannot read %s\n", path);
         return 2;
     }
     JsVm *vm = js_vm_new(NULL);
     JsContext *ctx = js_context_new(vm);
     if (!vm || !ctx) {
-        fprintf(stderr, "jsvm: out of memory\n");
+        fprintf(stderr, "lamassu: out of memory\n");
         free(bytes);
         return 2;
     }
@@ -416,9 +426,10 @@ static int run_bytecode(const char *path) {
     int kind = js_bytecode_kind(bytes, len);
 
     if (kind == 1 /* JS_BC_MODULE */) {
-        /* Module: dependencies load from sibling <base>.jsbc files. */
+        /* Module: the graph (root included) loads from sibling <base>.jsbc
+         * files; the canonicalizer maps any specifier to its base name. */
         set_root_dir(path);
-        js_set_bytecode_resolver(ctx, bc_file_resolver, NULL);
+        js_set_module_loader(ctx, bc_file_loader, bc_canonicalize, vm);
         uint16_t spec[256];
         /* build a UTF-16 view of the path, then take its base name as identity */
         uint16_t pathu[2048];
@@ -426,25 +437,23 @@ static int run_bytecode(const char *path) {
         for (const char *p = path; *p && pn < 2048; p++)
             pathu[pn++] = (uint16_t)(unsigned char)*p;
         size_t sn = spec_base(pathu, pn, spec, 256);
-        const char *err_msg;
-        uint32_t err_pos;
-        bool ok;
-        JsValue ns = js_eval_module_bytecode(ctx, spec, sn, bytes, len, &ok, &err_msg, &err_pos);
-        free(bytes);
-        if (!ok) {
-            fprintf(stderr, "%s: %s\n", path, err_msg ? err_msg : "module error");
-            if (js_is_string(ns) || js_is_object(ns)) {
-                js_gc_protect(vm, &ns);
-                JsValue s = js_to_string(ctx, ns);
-                size_t sl;
-                const uint16_t *su = js_string_units(s, &sl);
-                if (su)
-                    print_utf16(stderr, su, sl);
-                fputc('\n', stderr);
-                js_gc_unprotect(vm, &ns);
-            }
+        free(bytes); /* the loader re-reads the root from disk */
+        JsValue pr = js_eval_module(ctx, spec, sn);
+        js_gc_protect(vm, &pr);
+        if (js_promise_state(pr) != 1) {
+            JsValue reason = js_promise_result(pr);
+            fprintf(stderr, "%s: ", path);
+            JsValue s = js_to_string(ctx, reason);
+            size_t sl;
+            const uint16_t *su = js_string_units(s, &sl);
+            if (su)
+                print_utf16(stderr, su, sl);
+            fputc('\n', stderr);
+            js_gc_unprotect(vm, &pr);
             status = 1;
         } else {
+            JsValue ns = js_promise_result(pr);
+            js_gc_unprotect(vm, &pr);
             /* a page template can `export default` its rendered string */
             static const uint16_t dflt[] = {'d','e','f','a','u','l','t'};
             JsValue def = js_module_get_export(ctx, ns, dflt, 7);
@@ -471,8 +480,10 @@ static int run_bytecode(const char *path) {
         status = 1;
     } else {
         js_gc_protect(vm, &fn);
-        JsValue result;
-        bool ok = js_run_module(ctx, fn, &result);
+        JsValue p = js_run_module(ctx, fn);
+        int st = js_promise_state(p);
+        bool ok = st == 0 || st == 1;
+        JsValue result = js_promise_result(p);
         js_gc_protect(vm, &result);
         JsValue str = js_to_string(ctx, result);
         size_t slen;
@@ -502,36 +513,36 @@ int main(int argc, char **argv) {
         return run_bytecode(argv[2]);
     if (argc != 2) {
         fprintf(stderr,
-                "usage: jsvm [file.js]                 run a source file (or REPL if omitted)\n"
-                "       jsvm --emit-bytecode SRC OUT   compile SRC to a bytecode cache OUT\n"
-                "       jsvm --run-bytecode FILE       run a bytecode cache\n");
+                "usage: lamassu [file.js]                 run a source file (or REPL if omitted)\n"
+                "       lamassu --emit-bytecode SRC OUT   compile SRC to a bytecode cache OUT\n"
+                "       lamassu --run-bytecode FILE       run a bytecode cache\n");
         return 2;
     }
     size_t byte_len;
     uint8_t *bytes = read_file(argv[1], &byte_len);
     if (!bytes) {
-        fprintf(stderr, "jsvm: cannot read %s\n", argv[1]);
+        fprintf(stderr, "lamassu: cannot read %s\n", argv[1]);
         return 2;
     }
     size_t len;
     uint16_t *src = utf8_to_utf16(bytes, byte_len, &len);
     free(bytes);
     if (!src) {
-        fprintf(stderr, "jsvm: out of memory\n");
+        fprintf(stderr, "lamassu: out of memory\n");
         return 2;
     }
 
     JsVm *vm = js_vm_new(NULL);
     JsContext *ctx = js_context_new(vm);
     if (!vm || !ctx) {
-        fprintf(stderr, "jsvm: out of memory\n");
+        fprintf(stderr, "lamassu: out of memory\n");
         return 2;
     }
 
     static const uint16_t print_name[] = {'p', 'r', 'i', 'n', 't'};
     js_register_native(ctx, print_name, 5, native_print, NULL);
     set_root_dir(argv[1]);
-    js_set_module_resolver(ctx, file_resolver, NULL);
+    js_set_module_loader(ctx, file_loader, NULL, vm);
 
     int status = 0;
     const char *err_msg;
@@ -540,17 +551,15 @@ int main(int argc, char **argv) {
     bool is_module = !js_is_function(fn) && err_msg && strstr(err_msg, "module loader");
 
     if (is_module) {
-        /* the file uses import/export: run it through the module pipeline */
+        /* the file uses import/export: run it through the module pipeline
+         * (the loader serves this pre-read source for '<root>') */
+        g_root_src = src;
+        g_root_src_len = len;
         static const uint16_t root_spec[] = {'<', 'r', 'o', 'o', 't', '>'};
-        bool ok;
-        JsValue ns = js_eval_module(ctx, root_spec, 6, src, len, &ok, &err_msg, &err_pos);
-        (void)ns;
-        if (!ok && err_msg) {
-            fprintf(stderr, "%s: %s\n", argv[1], err_msg);
-            status = 1;
-        } else if (!ok) {
-            js_gc_protect(vm, &ns);
-            JsValue str = js_to_string(ctx, ns);
+        JsValue p = js_eval_module(ctx, root_spec, 6);
+        js_gc_protect(vm, &p);
+        if (js_promise_state(p) == 2) {
+            JsValue str = js_to_string(ctx, js_promise_result(p));
             size_t slen;
             const uint16_t *su = js_string_units(str, &slen);
             fprintf(stderr, "%s: uncaught ", argv[1]);
@@ -559,6 +568,8 @@ int main(int argc, char **argv) {
             fputc('\n', stderr);
             status = 1;
         }
+        js_gc_unprotect(vm, &p);
+        g_root_src = NULL;
     } else if (!js_is_function(fn)) {
         uint32_t line, col;
         js_source_line_col(src, len, err_pos, &line, &col);
@@ -566,8 +577,10 @@ int main(int argc, char **argv) {
         status = 1;
     } else {
         js_gc_protect(vm, &fn);
-        JsValue result;
-        bool ok = js_run_module(ctx, fn, &result);
+        JsValue p = js_run_module(ctx, fn);
+        int st = js_promise_state(p);
+        bool ok = st == 0 || st == 1;
+        JsValue result = js_promise_result(p);
         js_gc_protect(vm, &result);
         JsValue str = js_to_string(ctx, result);
         size_t slen;

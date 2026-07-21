@@ -1,5 +1,5 @@
 /*
- * jsvm playground — Vite entry. Loads the engine from the npm package
+ * lamassu playground — Vite entry. Loads the engine from the npm package
  * (@mdy-docs/lamassu-js) and drives the editor + REPL UI. The wasm URL is
  * imported through Vite's `?url` asset handling and handed to the factory, so
  * the binary resolves correctly in dev and in the hashed production build.
@@ -11,8 +11,8 @@ const SAMPLES = [
   ["Welcome",
 `// Everything here runs in a C-based JS engine compiled to WASM.
 // Try running this, then type  greet('you')  in the REPL →
-function greet(who) { return \`Hello, \${who}, from jsvm!\`; }
-const engine = { name: 'jsvm', lang: 'C', target: 'WebAssembly' };
+function greet(who) { return \`Hello, \${who}, from lamassu!\`; }
+const engine = { name: 'lamassu', lang: 'C', target: 'WebAssembly' };
 for (const [k, v] of Object.entries(engine)) print(\`\${k}: \${v}\`);
 greet('world');`],
 
@@ -69,7 +69,7 @@ for (const m of log.matchAll(re)) print(m[4], m[2].padEnd(4), m[3]);
 'emails: ' + 'a@b.com, c@d.org'.match(/\\w+@\\w+\\.\\w+/g).join(' | ');`],
 
   ["JSON",
-`const data = { title: 'jsvm', features: ['closures', 'async', 'modules'], meta: { v: 1, wasm: true } };
+`const data = { title: 'lamassu', features: ['closures', 'async', 'modules'], meta: { v: 1, wasm: true } };
 const text = JSON.stringify(data, null, 2);
 print(text);
 const parsed = JSON.parse(text);
@@ -252,7 +252,7 @@ createLamassu({ wasmUrl })
   .then((e) => {
     engine = e;
     ready = true;
-    engineEl.textContent = "jsvm engine ready — " + SAMPLES.length + " samples";
+    engineEl.textContent = "lamassu engine ready — " + SAMPLES.length + " samples";
     loadSample(0, samplesEl.firstChild);
     promptEl.focus();
   })

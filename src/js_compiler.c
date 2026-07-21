@@ -1,5 +1,5 @@
 #include "js_bytecode.h"
-#ifdef JSVM_HAS_REGEX
+#ifdef LAMASSU_HAS_REGEX
 #include "js_regexp.h"
 #endif
 
@@ -1424,8 +1424,18 @@ static bool compile_expr(JsCompiler *cx, const JsAstNode *n) {
         note_pos(cx, n->pos);
         /* operand in, result out: net stack effect 0 */
         return compile_expr(cx, n->a) && emit_op(cx, JS_OP_AWAIT, 0);
+    case JS_AST_IMPORT_CALL:
+        note_pos(cx, n->pos);
+        if (!compile_expr(cx, n->a))
+            return false;
+        /* options argument: evaluated (after the specifier, per spec order)
+         * for side effects only, then discarded */
+        if (n->b && !(compile_expr(cx, n->b) && emit_op(cx, JS_OP_POP, -1)))
+            return false;
+        /* specifier in, promise out: net stack effect 0 */
+        return emit_op(cx, JS_OP_DYNAMIC_IMPORT, 0);
     case JS_AST_REGEX: {
-#ifdef JSVM_HAS_REGEX
+#ifdef LAMASSU_HAS_REGEX
         /* early SyntaxError: validate the pattern now; the opcode recompiles
          * it at evaluation (a literal yields a fresh object each time) */
         const char *em = js_regexp_validate(cx->vm, n->units, n->len,

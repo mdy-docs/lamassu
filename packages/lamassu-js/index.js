@@ -57,8 +57,8 @@ export async function createLamassu(options = {}) {
     return JSON.stringify(value === undefined ? null : value);
   };
 
-  const evalRaw = M.cwrap("jsvm_eval", "string", ["string"], { async: true });
-  const resetRaw = M.cwrap("jsvm_reset", null, []);
+  const evalRaw = M.cwrap("lamassu_eval", "string", ["string"], { async: true });
+  const resetRaw = M.cwrap("lamassu_reset", null, []);
 
   return {
     /**

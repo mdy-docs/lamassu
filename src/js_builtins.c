@@ -22,7 +22,7 @@
 #include "js_date.h"
 #include "js_mapobj.h"
 #include "js_setobj.h"
-#ifdef JSVM_HAS_REGEX
+#ifdef LAMASSU_HAS_REGEX
 #include "js_regexp.h"
 #endif
 
@@ -504,7 +504,7 @@ static void append_replacement(StrBuf *sb, JsString *rep, const uint16_t *match,
 
 static bool sm_replace_impl(JsContext *ctx, JsValue tv, const JsValue *args, int argc,
                             JsValue *r, bool all) {
-#ifdef JSVM_HAS_REGEX
+#ifdef LAMASSU_HAS_REGEX
     if (js_regexp_is(ARG(0)))
         return js_re_str_replace(ctx, tv, args, argc, r, all);
 #endif
@@ -550,7 +550,7 @@ static bool sm_replaceAll(JsContext *ctx, JsValue tv, const JsValue *a, int c, J
 }
 
 static bool sm_split(JsContext *ctx, JsValue tv, const JsValue *args, int argc, JsValue *r) {
-#ifdef JSVM_HAS_REGEX
+#ifdef LAMASSU_HAS_REGEX
     if (js_regexp_is(ARG(0)))
         return js_re_str_split(ctx, tv, args, argc, r);
 #endif
@@ -2554,7 +2554,7 @@ bool js_builtins_init(JsContext *ctx) {
         {"repeat", sm_repeat}, {"padStart", sm_padStart}, {"padEnd", sm_padEnd},
         {"replace", sm_replace}, {"replaceAll", sm_replaceAll}, {"split", sm_split},
         {"concat", sm_concat}, {"toString", sm_toString}, {"valueOf", sm_toString},
-#ifdef JSVM_HAS_REGEX
+#ifdef LAMASSU_HAS_REGEX
         {"match", js_re_str_match}, {"matchAll", js_re_str_matchAll},
         {"search", js_re_str_search},
 #endif
@@ -2701,7 +2701,7 @@ bool js_builtins_init(JsContext *ctx) {
     if (!js_promise_builtins_init(ctx))
         return false;
 
-#ifdef JSVM_HAS_REGEX
+#ifdef LAMASSU_HAS_REGEX
     /* RegExp global + real RegExp.prototype (js_regexp.c) */
     if (!js_regexp_builtins_init(ctx))
         return false;

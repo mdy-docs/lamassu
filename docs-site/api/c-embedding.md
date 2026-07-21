@@ -96,7 +96,7 @@ Strings are **UTF-16 code units**, always carried as a `uint16_t*` +
 code-unit length — never NUL-terminated C strings, in the core or at the
 embedding boundary. This matches JS `.length`/indexing/slice semantics
 exactly. Convert to/from UTF-8 at your own outer edge if your host needs
-it (see `tools/jsvm_cli.c` for a small, dependency-free converter).
+it (see `tools/lamassu.c` for a small, dependency-free converter).
 
 ```c
 JsValue js_string_new(JsVm *vm, const uint16_t *units, size_t len); // undefined on OOM
@@ -350,5 +350,5 @@ js_vm_free(vm); // frees ctx too
 ```
 
 For a fuller worked example — argument parsing, a module resolver, a
-`print` native, bytecode caching — see `tools/jsvm_cli.c`, the native
+`print` native, bytecode caching — see `tools/lamassu.c`, the native
 command-line tool this same library backs.

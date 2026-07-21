@@ -1,6 +1,6 @@
 /*
  * RegExp binding layer over third_party/baru-re (ECMAScript-flavored
- * backtracking regex engine). Feature-flagged behind JSVM_HAS_REGEX; the
+ * backtracking regex engine). Feature-flagged behind LAMASSU_HAS_REGEX; the
  * compiler rejects regex literals with a clear message when it's off.
  *
  * A regexp is a JS_KIND_OBJECT cell with obj_kind == JS_OBJ_REGEXP whose
@@ -15,7 +15,7 @@
 
 #include "lamassu_internal.h"
 
-#ifdef JSVM_HAS_REGEX
+#ifdef LAMASSU_HAS_REGEX
 
 #include "regexp.h"
 
@@ -102,6 +102,6 @@ bool js_re_str_replace(JsContext *ctx, JsValue tv, const JsValue *args, int argc
 bool js_re_str_split(JsContext *ctx, JsValue tv, const JsValue *args, int argc,
                      JsValue *r);
 
-#endif /* JSVM_HAS_REGEX */
+#endif /* LAMASSU_HAS_REGEX */
 
 #endif /* JS_REGEXP_H */
